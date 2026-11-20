@@ -1,0 +1,19 @@
+{% if findings %}
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Advisory</th><th>Severity</th><th>Package</th><th>Affected asset</th><th>Fixed version</th><th>Observation</th></tr></thead>
+    <tbody>
+    {% for finding in findings %}
+    <tr>
+        <td><a class="primary-link" href="{{ path('finding', {id: finding.id}) }}">{{ finding.data.advisory }}</a><small>{{ finding.source }}</small></td>
+        <td><span class="severity {{ finding.data.severity|lower }}">{{ finding.data.severity|lower|capitalize }}</span></td>
+        <td class="mono">{{ finding.data.package }}<small>{{ finding.data.version }}</small></td>
+        <td><a href="{{ path('asset', {id: finding.asset_id}) }}">{{ finding.asset_name|length > 28 ? finding.asset_name|slice(0, 24) ~ '…' : finding.asset_name }}</a></td>
+        <td class="mono">{{ finding.data.fixed ?: '—' }}</td>
+        <td>{{ finding.active ? 'Detected' : 'Absent at last scan' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}<p class="empty">No findings match this view.</p>{% endif %}

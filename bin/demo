@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+fixture="$PWD/var/demo/patchrocket"
+
+fixture_composer() {
+    docker run --rm --pull=never --network none --cap-drop=ALL --security-opt=no-new-privileges \
+        --user "$(id -u):$(id -g)" --env HOME=/tmp --env COMPOSER_HOME=/tmp/composer \
+        --mount "type=bind,source=$1,target=/app" --workdir /app patchrocket-worker:local \
+        composer --no-interaction --no-plugins --no-scripts "${@:2}"
+}
+
+fixture_run() {
+    docker run -d --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=32m --cap-drop=ALL --security-opt=no-new-privileges \
+        --label org.patchrocket.fixture=true --name "$1" "$2"
+}
+
+register_fixture() {
+    php bin/console patchrocket:inventory repository "$fixture" --demo --editable=src/Title.php
+}
+
+case "${1:-}" in
+    setup)
+        php bin/console patchrocket:inventory init
+        if [[ ! -d "$fixture/.git" ]]; then
+            [[ ! -e "$fixture" ]] || { echo "Fixture directory already exists without a Git repository." >&2; exit 1; }
+            mkdir -p "$fixture"
+            cp -R demo/fixture/. "$fixture/"
+            fixture_composer "$fixture" update --no-audit
+            git -C "$fixture" init -q
+            git -C "$fixture" add composer.json composer.lock src tests public packages phpunit.xml phpstan.neon
+            git -C "$fixture" -c user.name=PatchRocket -c user.email=demo@patchrocket.invalid -c commit.gpgsign=false commit -qm 'Synthetic advisory baseline'
+        fi
+        repository="$(register_fixture)"
+        fixture_composer "$fixture" install --prefer-dist
+        docker build --network none -f demo/runtime.Dockerfile -t patchrocket-fixture-baseline:local "$fixture"
+        if docker container inspect patchrocket-fixture-baseline >/dev/null 2>&1; then
+            marker="$(docker container inspect --format '{{ index .Config.Labels "org.patchrocket.fixture" }}' patchrocket-fixture-baseline)"
+            [[ "$marker" == true ]] || { echo 'The baseline container name is already in use.' >&2; exit 1; }
+            current="$(docker container inspect --format '{{ .Image }}' patchrocket-fixture-baseline)"
+            expected="$(docker image inspect --format '{{ .Id }}' patchrocket-fixture-baseline:local)"
+            if [[ "$current" != "$expected" ]]; then
+                docker rm -f patchrocket-fixture-baseline
+            fi
+        fi
+        if docker container inspect patchrocket-fixture-baseline >/dev/null 2>&1; then
+            docker start patchrocket-fixture-baseline
+        else
+            fixture_run patchrocket-fixture-baseline patchrocket-fixture-baseline:local
+        fi
+        php bin/console patchrocket:inventory docker --label org.patchrocket.fixture=true --repository "$repository"
+        php bin/console patchrocket:inventory scan "$repository"
+        php bin/console patchrocket:inventory scan-image patchrocket-fixture-baseline:local --demo
+        php bin/console patchrocket:inventory list
+        ;;
+    queue)
+        repository="$(register_fixture)"
+        while read -r kind id advisory package; do
+            [[ "$kind" == finding ]] || continue
+            printf '%s %s\n' "$advisory" "$(php bin/console patchrocket:change queue "$id")"
+        done < <(php bin/console patchrocket:inventory list "$repository")
+        ;;
+    stage)
+        id="${2:?Supply an approved remediation ID}"
+        [[ "$id" =~ ^[a-f0-9]{24}$ ]] || exit 2
+        [[ "$(php bin/console patchrocket:change show "$id")" == approved ]] || { echo 'Approve the fixture change before building.' >&2; exit 1; }
+        scratch="$(mktemp -d -t patchrocket-demo.XXXXXXXX)"
+        trap 'rm -rf -- "$scratch"' EXIT
+        mkdir "$scratch/source"
+        git -C "$fixture" archive HEAD | tar -x -C "$scratch/source"
+        php bin/console patchrocket:change patch "$id" > "$scratch/change.patch"
+        (cd "$scratch/source" && git apply "$scratch/change.patch")
+        fixture_composer "$scratch/source" install --prefer-dist
+        patch_hash="$(sha256sum "$scratch/change.patch" | cut -d' ' -f1)"
+        image="patchrocket-fixture:$id"
+        docker build --network none -f demo/runtime.Dockerfile --label "org.patchrocket.patch-sha256=$patch_hash" -t "$image" "$scratch/source"
+        php bin/console patchrocket:change stage "$id" "$image"
+        ;;
+    rollout)
+        id="${2:?Supply a staged remediation ID}"
+        [[ "$id" =~ ^[a-f0-9]{24}$ ]] || exit 2
+        [[ "$(php bin/console patchrocket:change show "$id")" == monitoring ]] || { echo 'Stage the scanned image first.' >&2; exit 1; }
+        name="patchrocket-fixture-$id"
+        if docker container inspect "$name" >/dev/null 2>&1; then
+            marker="$(docker container inspect --format '{{ index .Config.Labels "org.patchrocket.fixture" }}' "$name")"
+            [[ "$marker" == true ]] || { echo 'The rollout container name is already in use.' >&2; exit 1; }
+            docker start "$name"
+        else
+            fixture_run "$name" "patchrocket-fixture:$id"
+        fi
+        for ((check=0; check<12; check++)); do
+            [[ "$(docker container inspect --format '{{ .State.Health.Status }}' "$name")" == healthy ]] && break
+            sleep 1
+        done
+        php bin/console patchrocket:change observe "$id" "$name"
+        if [[ "$(docker container inspect --format '{{ index .Config.Labels "org.patchrocket.fixture" }}' patchrocket-fixture-baseline 2>/dev/null)" == true ]]; then
+            docker stop patchrocket-fixture-baseline
+        fi
+        repository="$(register_fixture)"
+        php bin/console patchrocket:inventory docker --label org.patchrocket.fixture=true --repository "$repository"
+        ;;
+    *)
+        echo 'Usage: bin/demo setup | queue | stage <approved-change> | rollout <staged-change>' >&2
+        exit 2
+        ;;
+esac

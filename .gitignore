@@ -1,0 +1,15 @@
+/vendor/
+/var/
+/.env.local
+/.env.*.local
+/.phpunit.result.cache
+/config/reference.php
+
+# Local credentials, editor state, and generated artifacts
+/.env.local.php
+/auth.json
+/.idea/
+/.vscode/
+.DS_Store
+*.pem
+*.key

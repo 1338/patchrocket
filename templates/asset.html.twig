@@ -1,0 +1,75 @@
+{% extends 'base.html.twig' %}
+{% block title %}{{ asset.name }}{% endblock %}
+{% block content %}
+<a class="back" href="{{ path('assets') }}">Asset inventory</a>
+<header class="page-head">
+    <div><h1 class="anywhere">{{ asset.name }}</h1><p>{{ asset.kind|capitalize }} · observed {{ asset.observed_at|date('M j, H:i', 'UTC') }} UTC</p></div>
+    {% if asset.data.sbom is defined %}<a class="button secondary" href="{{ path('sbom', {id:asset.id}) }}">Download SBOM</a>{% endif %}
+    {% if asset.kind == 'binary' and dashboard_role == 'admin' %}<a class="button secondary" href="{{ path('binaries', {edit:asset.id}) }}">Manage executable</a>{% endif %}
+</header>
+<section class="panel">
+    <header><h2>Asset details</h2></header>
+    <dl class="facts">
+        {% if asset.kind == 'binary' %}<div><dt>Installed path</dt><dd class="anywhere">{{ asset.data.path }}</dd></div>{% endif %}
+        {% for field, label in {reference:'Image reference', digest:asset.kind == 'binary' ? 'Installed SHA-256' : 'Image digest', image:'Observed image', revision:asset.kind == 'binary' ? 'Installed source commit' : 'Scanned commit', role:'Repository role', infra_context:'Matching Kubernetes context', hostname:'Reported hostname', tools:'Detected infrastructure tools', ssh_alias:'SSH alias', os:'Operating system', kernel:'Kernel', manager:'Package manager', controller:'Controller', platform:'Platform', discovery_source:'Discovery source', collected_at:'Collected at', subdirectory:'Repository scope', discovery_state:'Discovery state', scope:'Discovery scope', phase:'Pod phase', health:'Container health', scan_source:'Scan source', scanned_at:'Last successful scan', scan_attempted_at:'Last scan attempt', scan_outcome:'Last scan result'} %}
+        {% if asset.data[field] is defined and asset.data[field] is not null %}<div><dt>{{ label }}</dt><dd class="anywhere">{{ asset.data[field] }}</dd></div>{% endif %}
+        {% endfor %}
+        {% if asset.data.running is defined %}<div><dt>Observed container state</dt><dd>{{ asset.data.running ? 'Running' : 'Stopped' }}</dd></div>{% endif %}
+        {% if asset.data.declared_images is defined %}<div><dt>Declared images</dt><dd>{{ asset.data.declared_images|join(', ') }}</dd></div>{% endif %}
+        <div><dt>Asset ID</dt><dd class="mono anywhere">{{ asset.id }}</dd></div>
+    </dl>
+</section>
+{% include '_build_sources.html.twig' %}
+{% if asset.kind == 'argo-application' %}
+    {% include '_argo_application.html.twig' %}
+{% endif %}
+{% set argo_links = links|filter(l => l.asset_kind == 'argo-application') %}
+<section class="panel">
+    <header><h2>Related assets</h2></header>
+    {% for link in asset.kind == 'repository' ? links|filter(l => l.asset_kind != 'argo-application') : links %}
+    <a class="asset-row" href="{{ path('asset', {id:link.id}) }}"><span class="anywhere"><strong>{{ link.name }}</strong><small>{{ link.asset_kind|capitalize }} · {{ link.discovery }} · {{ link.observed_at|date('M j, H:i', 'UTC') }} UTC</small></span><span class="relation">{{ link.kind }}</span></a>
+    {% else %}<p class="empty">No relationships have been recorded for this asset.</p>{% endfor %}
+</section>
+{% if asset.kind == 'repository' and argo_links %}
+<details class="panel"><summary>Argo CD applications ({{ argo_links|length }})</summary>
+    {% for link in argo_links %}
+    <a class="asset-row" href="{{ path('asset', {id:link.id}) }}"><strong>{{ link.name }}</strong><span class="relation">{{ link.discovery }}</span></a>
+    {% endfor %}
+</details>
+{% endif %}
+{% if asset.data.role|default == 'infrastructure' %}
+{% set infra = asset.data.infra_report ?? null %}
+<section class="panel">
+    <header><h2>Infrastructure declarations</h2></header>
+    {% if infra %}
+    <p class="empty">{{ infra.resources|length }} declarations · {{ infra.external|length }} external references{% if infra.skipped %} · {{ infra.skipped }} templates or documents skipped{% endif %}</p>
+    <div class="table-wrap"><table><thead><tr><th>Declaration</th><th>Namespace</th><th>Source file</th><th>Inventory match</th></tr></thead><tbody>
+    {% for entry in infra.resources %}
+        <tr><td>{{ entry.kind }} · {{ entry.name }}</td><td>{{ entry.namespace ?: 'Unspecified' }}{% if entry.namespace_from|default %} ({{ entry.namespace_from }}){% endif %}</td><td class="anywhere">{{ entry.path }}</td>
+        <td>{% if entry.observed %}<a href="{{ path('asset', {id:entry.observed}) }}">Observed workload</a>{% else %}Declared only{% endif %}</td></tr>
+    {% endfor %}
+    </tbody></table></div>
+    {% if infra.terraform %}<details><summary>Terraform configuration files</summary><ul>{% for file in infra.terraform %}<li>{{ file }}</li>{% endfor %}</ul></details>{% endif %}
+    {% else %}<p class="empty">Scan this repository to see its infrastructure declarations.</p>{% endif %}
+</section>
+{% if infra.external|default %}
+<section class="panel">
+    <header><h2>External references</h2></header>
+    <p class="empty">These endpoints, sources, and stores are referenced by the repository. Register any in-scope external infrastructure as its own connection.</p>
+    <div class="table-wrap"><table><thead><tr><th>Reference type</th><th>Target</th><th>Source file</th></tr></thead><tbody>
+    {% for entry in infra.external %}<tr><td>{{ entry.kind }}</td><td class="anywhere">{{ entry.target }}</td><td class="anywhere">{{ entry.path }}</td></tr>{% endfor %}
+    </tbody></table></div>
+</section>
+{% endif %}
+{% endif %}
+<section class="panel"><header><h2>Vulnerabilities · {{ finding_count }}</h2>{% if finding_count %}<a href="{{ path('findings', {asset:asset.id}) }}">All findings</a> <a href="{{ path('findings', {asset:asset.id, view:'advisories'}) }}">Group by advisory</a>{% endif %}</header>{% include '_findings.html.twig' %}</section>
+{% set components = asset.data.sbom.components ?? asset.data.components ?? [] %}
+{% if components %}
+<details class="panel"><summary>Components · {{ components|length }}</summary>
+<div class="table-wrap"><table><thead><tr><th>Component</th><th>Version</th><th>Basis</th></tr></thead><tbody>
+{% for item in components %}
+<tr><td>{{ item.group is defined ? item.group ~ '/' : '' }}{{ item.name }}</td><td class="mono">{{ item.version ?? '—' }}</td><td>{{ asset.kind == 'repository' ? 'Resolved' : (asset.kind == 'linux' ? 'Installed' : 'Image inventory') }}</td></tr>
+{% endfor %}
+</tbody></table></div></details>
+{% endif %}
+{% endblock %}

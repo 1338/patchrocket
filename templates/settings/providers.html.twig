@@ -1,0 +1,33 @@
+{% extends 'settings/_layout.html.twig' %}
+{% import 'settings/_forms.html.twig' as form %}
+{% set section = 'providers' %}
+
+{% block settings_content %}
+<section class="panel">
+    <header><h2>Provider configuration</h2></header>
+    <form class="settings-content settings-form" id="ai-settings" data-model-url="{{ path('settings_models') }}" method="post" action="{{ path('settings_update', {action:'ai'}) }}">
+        {{ form.token('ai') }}
+        <label>Active provider<select name="provider">
+            {% for value, label in {off:'Disabled', ollama:'Ollama', openai:'OpenAI', codex:'Codex CLI · development fixture only', replay:'Recorded fixture proposal'} %}
+            {% if value != 'codex' or codex_available %}<option value="{{ value }}"{{ value == ai.provider ? ' selected' : '' }}>{{ label }}</option>{% endif %}
+            {% endfor %}
+        </select></label>
+        <label>Model<input name="model" list="discovered-models" maxlength="200" value="{{ ai.model }}" placeholder="Model name"></label>
+        <datalist id="discovered-models"></datalist>
+        <label>Reasoning effort<select name="effort"><option value="">Provider default</option>
+        {% if ai.effort %}<option value="{{ ai.effort }}" selected>{{ ai.effort|capitalize }}</option>{% endif %}
+        </select></label>
+        <div><button class="button secondary" type="button" id="refresh-models">Refresh models</button>
+        <small id="model-discovery-status" role="status"></small></div>
+        <label>Ollama endpoint<input type="url" name="endpoint" required value="{{ ai.endpoint }}"></label>
+        <label>Maximum attempts<input name="limit" type="number" min="0" max="3" required value="{{ ai.limit }}"></label>
+        {{ form.credential('reference', 'Managed OpenAI credential', ai.reference, vault_destinations, 'openai') }}
+        <label>OpenAI API key<input name="key" type="password" autocomplete="new-password" placeholder="{{ ai.credential_configured ? 'Key configured' : 'No key configured' }}"></label>
+        <label class="check-filter"><input type="checkbox" name="clear_key" value="1"> Clear stored OpenAI credential</label>
+        <label class="check-filter"><input type="checkbox" name="cloud_source" value="1"{{ ai.cloud_source ? ' checked' : '' }}> Allow external AI requests</label>
+        <small>OpenAI requests can include allowlisted source files and verification excerpts. Codex CLI uses the existing login for synthetic fixture testing.</small>
+        <div><button class="button">Save AI settings</button></div>
+    </form>
+    <script src="/settings-models.js" defer></script>
+</section>
+{% endblock %}

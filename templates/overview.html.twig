@@ -1,0 +1,33 @@
+{% extends 'base.html.twig' %}
+{% block content %}
+<header class="page-head">
+    <div><h1>Security overview</h1><p>Track findings from the affected asset to the verified fix.</p></div>
+    <a class="button secondary" href="{{ path('overview') }}">Refresh</a>
+</header>
+<section class="metrics" aria-label="Inventory and remediation metrics">
+    {% for metric in [
+        {value:total_assets, label:'Discovered assets'}, {value:total_findings, label:'Active findings'},
+        {value:severity.CRITICAL ?? 0, label:'Critical findings', style:'danger'}, {value:fixable, label:'Fix available'},
+        {value:pending, label:'Awaiting approval', style:'warning'}, {value:running, label:'Active jobs'},
+        {value:verified, label:'Verified patches', style:'success', runtime:true}, {value:failed, label:'Failed attempts'}
+    ] %}
+    <div class="metric {{ metric.style ?? '' }}"><small>{{ metric.label }}</small><strong>{{ metric.value }}</strong>{% if metric.runtime ?? false %}<small>{{ deployed }} with runtime evidence</small>{% endif %}</div>
+    {% endfor %}
+</section>
+<section class="panel">
+    <header><h2>Priority findings</h2><a href="{{ path('findings') }}">All vulnerabilities</a></header>
+    {% include '_findings.html.twig' %}
+</section>
+<div class="overview-bottom">
+    <section class="panel">
+        <header><h2>Recent remediations</h2><a href="{{ path('changes') }}">View remediations</a></header>
+        {% include '_changes.html.twig' with {changes: recent} %}
+    </section>
+    <section class="panel">
+        <header><h2>Asset breakdown</h2><a href="{{ path('assets') }}">View inventory</a></header>
+        {% for group in assets %}
+        <a class="asset-row" href="{{ path('assets', {kind: group.kind}) }}"><span>{{ group.kind|capitalize }}</span><strong>{{ group.total }}</strong></a>
+        {% else %}<p class="empty">Register an asset to start discovery.</p>{% endfor %}
+    </section>
+</div>
+{% endblock %}

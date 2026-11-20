@@ -1,0 +1,47 @@
+{% set settings = tracking.data.settings ?? {} %}
+{% set result = tracking.data.result ?? {} %}
+<section class="panel" id="release-tracking">
+    <header><h2>Release tracking</h2><a href="{{ publication.url }}" rel="noreferrer">Bitbucket PR #{{ publication.number }}</a></header>
+    {% if tracking %}
+    <div class="settings-content">
+        <p role="status"><strong>{{ tracking.next_at == 0 and result.status not in ['verified','closed'] ? 'Paused' : result.status|capitalize }}</strong> · {{ result.note }}{% if result.checked_at|default %}<small> {{ result.checked_at|date('M j, H:i:s', 'UTC') }} UTC</small>{% endif %}</p>
+        {% if dashboard_role != 'viewer' %}<div class="actions">
+            <form method="post" action="{{ path('release_tracking', {id:change.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('release-tracking-' ~ change.id) }}">
+                <button class="button secondary" name="operation" value="check">Check on next poll</button>
+                {% if tracking.next_at %}<button class="button secondary" name="operation" value="pause">Pause</button>{% endif %}
+            </form>
+        </div>{% endif %}
+    </div>
+    {% for label, evidence in result.checks %}
+        <div class="asset-row"><strong>{{ label }}</strong>{% if evidence.url|default %}<a href="{{ evidence.url }}" rel="noreferrer">{{ evidence.detail }}</a>{% else %}<span class="anywhere">{{ evidence.detail }}</span>{% endif %}</div>
+    {% endfor %}
+    {% endif %}
+    {% if dashboard_role != 'viewer' %}<details{% if not tracking %} open{% endif %}>
+        <summary>Tracking settings</summary>
+        <form class="settings-content settings-form" method="post" action="{{ path('release_tracking', {id:change.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('release-tracking-' ~ change.id) }}">
+            <label>Bitbucket credential reference<input name="bitbucket_credential" value="{{ settings.bitbucket_credential ?? '' }}" placeholder="manager:secret" required></label>
+            <label>Jenkins job URL<input name="jenkins_job" type="url" value="{{ settings.jenkins_job ?? '' }}" placeholder="https://jenkins.example/job/module/"></label>
+            <label>Jenkins credential override<input name="jenkins_credential" value="{{ settings.jenkins_credential ?? '' }}" placeholder="Uses the saved Jenkins server by default"></label>
+            <label>Infrastructure repository<select name="infra_connection"><option value="">Choose a source connection</option>
+                {% for connection in connections|filter(c => c.kind == 'repository' and c.data.role|default == 'infrastructure') %}
+                    <option value="{{ connection.id }}"{{ connection.id == settings.infra_connection|default ? ' selected' : '' }}>{{ connection.name }}</option>
+                {% endfor %}
+            </select></label>
+            <label>Infrastructure branch<input name="infra_branch" value="{{ settings.infra_branch ?? 'main' }}" required></label>
+            <label>Argo CD file in the infra repo<input name="infra_file" value="{{ settings.infra_file ?? '' }}" placeholder="cluster/acceptation/apps/module.yaml"></label>
+            <label>Kubernetes connection<select name="cluster_connection"><option value="">Choose a cluster</option>
+                {% for connection in connections|filter(c => c.kind == 'cluster') %}
+                    <option value="{{ connection.id }}"{{ connection.id == settings.cluster_connection|default ? ' selected' : '' }}>{{ connection.name }}</option>
+                {% endfor %}
+            </select></label>
+            <label>Argo CD Application<input name="application" value="{{ settings.application ?? '' }}"></label>
+            <label>Workload namespace<input name="namespace" value="{{ settings.namespace ?? '' }}"></label>
+            <label>Deployment<input name="deployment" value="{{ settings.deployment ?? '' }}"></label>
+            <label>Container<input name="container" value="{{ settings.container ?? '' }}"></label>
+            {% if dashboard_role == 'admin' %}<small>Jenkins, Harbor, and Argo CD use <a href="{{ path('settings_integrations') }}">Delivery integrations</a> settings.</small>{% endif %}
+            <div><button class="button" name="operation" value="save">Save tracking settings</button></div>
+        </form>
+    </details>{% endif %}
+</section>

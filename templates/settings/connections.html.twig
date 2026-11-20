@@ -1,0 +1,116 @@
+{% extends 'settings/_layout.html.twig' %}
+{% import 'settings/_forms.html.twig' as form %}
+{% set section = 'connections' %}
+
+{% block settings_content %}
+<section class="panel">
+    <header><h2>Infrastructure connections</h2></header>
+    <div class="settings-content">
+        {% if connections %}
+        <div class="table-wrap"><table><thead><tr><th>Connection</th><th>Last job</th><th>Actions</th></tr></thead><tbody>
+        {% for entry in connections %}
+        {% set needsCredential = (entry.kind in ['vm', 'cluster'] or (entry.kind == 'repository' and entry.data.target starts with 'https://')) and not entry.data.credential|default %}
+        <tr>
+            <td><strong>{{ entry.name }}</strong><small>{{ entry.kind|capitalize }}{% if entry.data.target %} · {{ entry.data.target }}{% endif %}{% if entry.data.port|default %} · port {{ entry.data.port }}{% endif %}</small>{% if entry.data.ansible_groups|default %}<small>Ansible groups {{ entry.data.ansible_groups|join(', ') }}</small>{% endif %}</td>
+            <td>{{ needsCredential ? 'Needs managed credentials' : entry.data.status|default('Saved')|capitalize }}{% if entry.data.interval|default %}<small>Every {{ entry.data.interval }} minutes</small>{% endif %}{% if entry.data.result|default %}<small>{{ entry.data.result }}</small>{% endif %}</td>
+            <td><div class="actions">
+                <a class="button secondary" href="{{ path('settings_connections', {edit:entry.id}) }}#connection-{{ entry.kind }}">Edit</a>
+                {% for op in needsCredential ? [] : (entry.kind == 'docker' ? ['discover'] : ['discover','scan']) %}
+                    <form method="post" action="{{ path('settings_update', {action:'run'}) }}">
+                    {{ form.token('run') }}<input type="hidden" name="id" value="{{ entry.id }}"><input type="hidden" name="operation" value="{{ op }}">
+                    <button class="button secondary">{{ op == 'scan' ? 'Scan now' : 'Discover' }}</button></form>
+                {% endfor %}
+                {% if entry.kind == 'cluster' and entry.data.argo_namespace|default and (entry.data.argo_credential|default or not needsCredential) %}
+                    <form method="post" action="{{ path('settings_update', {action:'run'}) }}">
+                    {{ form.token('run') }}<input type="hidden" name="id" value="{{ entry.id }}"><input type="hidden" name="operation" value="argo">
+                    <button class="button secondary">Read Argo CD</button></form>
+                {% endif %}
+                <form method="post" action="{{ path('settings_update', {action:'remove'}) }}">
+                {{ form.token('remove') }}<input type="hidden" name="id" value="{{ entry.id }}"><button class="button secondary">Remove connection</button></form>
+            </div></td>
+        </tr>
+        {% endfor %}
+        </tbody></table></div>
+        {% endif %}
+        <p>Discovery and scans run through the jobs worker. VMs and Kubernetes use managed credential references. Docker contexts use the worker’s configured Docker access.</p>
+        {% set connectionTypes = {
+            vm: {name:'VM over SSH', field:'SSH user@host', hint:'The managed bundle supplies the identity and host key.'},
+            cluster: {name:'Kubernetes cluster', field:'Kubeconfig context', hint:'Use the context from the managed kubeconfig.'},
+            docker: {name:'Docker host', field:'Container label filter', hint:'Leave blank to discover all containers on the worker’s Docker context.'},
+            registry: {name:'Registry image', field:'Registry reference at a SHA-256 digest', hint:'Use a fully qualified registry and immutable digest.'},
+            repository: {name:'Source repository', field:'HTTPS Git URL or existing checkout path', hint:'Register a managed remote or an existing checkout.'}
+        } %}
+        {% for kind, type in connectionTypes %}
+        {% set current = editing and editing.kind == kind ? editing : null %}
+        {% set values = current.data ?? {} %}
+        <details id="connection-{{ kind }}"{% if current %} open{% endif %}>
+            <summary>{{ current ? 'Edit' : 'Add' }} {{ type.name }}</summary>
+            <form method="post" action="{{ path('settings_update', {action:'connection'}) }}" class="settings-form">
+                {{ form.token('connection') }}
+                <input type="hidden" name="kind" value="{{ kind }}">
+                {% if current %}<input type="hidden" name="id" value="{{ current.id }}">{% endif %}
+                <label>Name<input name="name" required maxlength="120" value="{{ current.name ?? '' }}"></label>
+                <label>{{ type.field }}<input name="target" value="{{ values.target ?? '' }}"{% if kind != 'docker' %} required{% endif %}></label>
+                {% if kind == 'cluster' %}
+                    <label>Namespace<input name="namespace" value="{{ values.namespace ?: 'default' }}"></label>
+                    <label class="check-filter"><input type="checkbox" name="all_namespaces" value="1"{{ values.all_namespaces|default ? ' checked' : '' }}> Discover all namespaces</label>
+                    <label>Registries to scan<input name="registries" value="{{ values.registries ?? '' }}" placeholder="registry.example.com, docker.io"></label>
+                    <label>Image platform<input name="platform" value="{{ values.platform ?: 'linux/amd64' }}"></label>
+                    <div><a href="{{ path('settings_integrations') }}#argocd">Argo CD connection settings</a></div>
+                    {{ form.selectAssets(assets, 'host_asset', 'Hosting VM', ['linux'], values.host_asset ?? '', true) }}
+                {% elseif kind == 'vm' %}
+                    <label>SSH port<input name="port" type="number" min="1" max="65535" value="{{ values.port ?? '' }}" placeholder="Use the credential bundle port"></label>
+                    <label class="check-filter"><input type="checkbox" name="docker_inventory" value="1"{{ values.docker_inventory|default ? ' checked' : '' }}> Discover Docker containers over SSH</label>
+                    <label class="check-filter"><input type="checkbox" name="docker_sudo" value="1"{{ values.docker_sudo|default ? ' checked' : '' }}> Use non-interactive sudo for Docker inventory</label>
+                {% elseif kind == 'docker' %}
+                    <label>Docker context<input name="context" value="{{ values.context ?? '' }}" placeholder="Default worker context"></label>
+                {% elseif kind == 'registry' %}
+                    <label>Platform<input name="platform" value="{{ values.platform ?: 'linux/amd64' }}"></label>
+                {% elseif kind == 'repository' %}
+                    <label>Repository role<select name="role">
+                        <option value="application"{{ values.role|default == 'infrastructure' ? '' : ' selected' }}>Application</option>
+                        <option value="infrastructure"{{ values.role|default == 'infrastructure' ? ' selected' : '' }}>GitOps / infrastructure</option>
+                    </select></label>
+                    <label>Observed Kubernetes context for infrastructure links<input name="infra_context" value="{{ values.infra_context ?? '' }}" placeholder="Optional context name"></label>
+                    <label>Repository URL for Argo CD matching<input name="canonical_url" value="{{ values.canonical_url ?? '' }}" placeholder="Optional for an existing checkout"></label>
+                    <label>Repository subdirectory<input name="subdirectory" value="{{ values.subdirectory ?? '' }}"></label>
+                    <label>Editable PHP files for AI<textarea name="editable" rows="2">{{ values.editable ?? '' }}</textarea></label>
+                {% endif %}
+                {% if kind in ['vm','cluster','repository'] %}
+                    {{ form.credential('credential', 'Managed credential reference', values.credential ?? '', vault_destinations,
+                        {vm:'ssh',cluster:'kubeconfig',repository:'git'}[kind], kind in ['vm','cluster']) }}
+                {% endif %}
+                {% if kind in ['cluster','registry','docker'] %}{{ form.selectAssets(assets, 'repository', 'Associated repository', ['repository'], values.repository ?? '', true) }}{% endif %}
+                {% if kind != 'docker' %}<label>Scan interval in minutes (0 for manual)<input name="interval" type="number" min="0" max="43200" value="{{ values.interval ?? '0' }}" required></label>{% endif %}
+                <small>{{ type.hint }}</small>
+                <div class="actions"><button class="button">Save connection</button>{% if current %}<a href="{{ path('settings_connections') }}">Cancel edit</a>{% endif %}</div>
+            </form>
+        </details>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel">
+    <header><h2>Import Ansible inventory</h2></header>
+    <form class="settings-content settings-form" method="post" enctype="multipart/form-data" action="{{ path('settings_update', {action:'ansible-inventory'}) }}">
+        {{ form.token('ansible-inventory') }}
+        <label>Inventory file<input type="file" name="file" accept=".yaml,.yml,.json" required></label>
+        <label>Include only this group<input name="group" placeholder="All groups"></label>
+        <label>Default SSH user<input name="ssh_user" placeholder="For hosts without ansible_user"></label>
+        {{ form.credential('credential', 'Default managed credential reference', '', vault_destinations, 'ssh') }}
+        <small>Upload static YAML or JSON from <code>ansible-inventory --list</code>. A host can override the credential reference with <code>patchrocket_credential</code>. Run discovery from a saved VM connection to collect its assets.</small>
+        <div><button class="button">Import inventory</button></div>
+    </form>
+</section>
+
+<section class="panel">
+    <header><h2>Repository links</h2></header>
+    <form class="settings-content settings-form" method="post" action="{{ path('settings_update', {action:'link'}) }}">
+        {{ form.token('link') }}
+        {{ form.selectAssets(assets, 'asset', 'Affected asset', ['image','workload','container']) }}
+        {{ form.selectAssets(assets, 'repository', 'Repository', ['repository']) }}
+        <label>Relationship<select name="relationship"><option value="source">Associated source</option><option value="built-from">Built from</option><option value="deployment">Deployment configuration</option></select></label>
+        <div><button class="button">Link repository</button></div>
+    </form>
+</section>
+{% endblock %}

@@ -1,0 +1,70 @@
+{% extends 'settings/_layout.html.twig' %}
+{% import 'settings/_forms.html.twig' as form %}
+{% set section = 'integrations' %}
+
+{% block settings_content %}
+<p><a href="{{ path('settings_secrets') }}">Manage secrets managers and test references</a></p>
+
+<section class="panel" id="jenkins">
+    <header><h2>Jenkins</h2></header>
+    <form class="settings-content settings-form" method="post" action="{{ path('settings_update', {action:'jenkins-save'}) }}">
+        {{ form.token('jenkins-save') }}
+        <label>Server URL<input type="url" name="server" value="{{ editJenkins.server ?? '' }}" placeholder="https://ci.example.com/jenkins" required{% if editJenkins %} readonly{% endif %}></label>
+        {{ form.credential('reference', 'Managed read credential reference', editJenkins.reference ?? '', vault_destinations, 'jenkins', true) }}
+        <small>Use a bundle containing <code>server</code>, <code>username</code>, and <code>token</code>. Release trackers use this reference for jobs on the matching server.</small>
+        <div class="actions"><button class="button">Save Jenkins server</button>{% if editJenkins %}<a href="{{ path('settings_integrations') }}#jenkins">Cancel edit</a>{% endif %}</div>
+    </form>
+    {% for entry in jenkins %}
+    <div class="asset-row">
+        <span class="anywhere"><strong>{{ entry.server }}</strong><small>{{ entry.reference }}</small></span>
+        <div class="actions">
+            <a class="button secondary" href="{{ path('settings_integrations', {jenkins:entry.server}) }}#jenkins">Edit</a>
+            <form method="post" action="{{ path('settings_update', {action:'jenkins-remove'}) }}">
+                {{ form.token('jenkins-remove') }}<input type="hidden" name="server" value="{{ entry.server }}"><button class="button secondary">Remove</button>
+            </form>
+        </div>
+    </div>
+    {% endfor %}
+</section>
+
+<section class="panel" id="harbor">
+    <header><h2>Harbor and other registries</h2></header>
+    <form class="settings-content settings-form" method="post" action="{{ path('settings_update', {action:'registry-auth'}) }}">
+        {{ form.token('registry-auth') }}
+        <label>Registry host<input name="host" value="{{ editRegistry.host ?? '' }}" placeholder="registry.example.com" required{% if editRegistry %} readonly{% endif %}></label>
+        {{ form.credential('reference', 'Managed pull credential reference', editRegistry.reference ?? '', vault_destinations, 'registry', true) }}
+        <small>Use a bundle containing <code>host</code>, <code>username</code>, and <code>token</code>. Scans and release tracking look it up by registry host.</small>
+        <div class="actions"><button class="button">Save registry credential</button>{% if editRegistry %}<a href="{{ path('settings_integrations') }}#harbor">Cancel edit</a>{% endif %}</div>
+    </form>
+    {% for host, reference in registries %}
+    <div class="asset-row">
+        <span class="anywhere"><strong>{{ host }}</strong>{% if reference %}<small>{{ reference }}</small>{% endif %}</span>
+        <div class="actions">
+            <a class="button secondary" href="{{ path('settings_integrations', {registry:host}) }}#harbor">Edit</a>
+            <form method="post" action="{{ path('settings_update', {action:'registry-remove'}) }}">
+                {{ form.token('registry-remove') }}<input type="hidden" name="host" value="{{ host }}"><button class="button secondary">Remove</button>
+            </form>
+        </div>
+    </div>
+    {% endfor %}
+</section>
+
+<section class="panel" id="argocd">
+    <header><h2>Argo CD</h2><a href="{{ path('settings_connections') }}#connection-cluster">Kubernetes connections</a></header>
+    {% for cluster in clusters %}
+    {% set values = cluster.data %}
+    <form class="settings-content settings-form" method="post" action="{{ path('settings_update', {action:'argo-save'}) }}">
+        {{ form.token('argo-save') }}
+        <input type="hidden" name="id" value="{{ cluster.id }}">
+        <p><strong>{{ cluster.name }}</strong></p>
+        <label>Application namespace<input name="namespace" value="{{ values.argo_namespace ?? '' }}" placeholder="argocd"></label>
+        {{ form.credential('reference', 'Managed Argo CD read credential reference', values.argo_credential ?? '', vault_destinations,
+            'kubeconfig', false, 'Uses the cluster credential by default') }}
+        <small>PatchRocket reads Applications through Kubernetes. An optional separate kubeconfig can be limited to listing Applications in this namespace.</small>
+        <div><button class="button">Save Argo CD connection</button></div>
+    </form>
+    {% else %}
+    <p class="empty">Add a Kubernetes connection to configure its Argo CD access.</p>
+    {% endfor %}
+</section>
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends 'settings/_layout.html.twig' %}
+
+{% block settings_content %}
+{% set descriptions = {
+    connections: 'Add VMs, clusters, Docker hosts, registry images, and source repositories. Link assets to repositories.',
+    discovery: 'Find delivery services, hosts, and clusters and connect them to PatchRocket.',
+    integrations: 'Configure Jenkins, Harbor, and Argo CD for release tracking and scans.',
+    secrets: 'Connect secrets managers and test credential references.',
+    providers: 'Choose a provider, discover models, and set reasoning effort.',
+    scanning: 'Configure the scanner and worker, and schedule recurring scans.',
+    policy: 'Set approval policies and manage rollout schedules.',
+    access: 'Manage local users, sign-in providers, and role mappings.'
+} %}
+<nav class="settings-grid" aria-label="Settings overview">
+    {% for key, label in settings_sections %}
+    <a class="settings-card" id="{{ key }}" href="{{ path('settings_' ~ key) }}">
+        <h2>{{ label }}</h2>
+        <p>{{ descriptions[key] }}</p>
+    </a>
+    {% endfor %}
+</nav>
+{% endblock %}

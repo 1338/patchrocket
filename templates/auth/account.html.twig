@@ -1,0 +1,15 @@
+{% extends 'base.html.twig' %}
+{% block title %}Account{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Account</h1></header>
+<section class="panel">
+    <dl class="facts">
+        <div><dt>Account</dt><dd>{{ user.label }}</dd></div>
+        <div><dt>Role</dt><dd>{{ roles[user.role] }}</dd></div>
+        {% if user.provider is defined %}
+        <div><dt>Provider</dt><dd>{{ user.provider }}</dd></div>
+        <div><dt>Subject ID</dt><dd><code>{{ user.subject }}</code></dd></div>
+        {% endif %}
+    </dl>
+</section>
+{% endblock %}

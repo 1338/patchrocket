@@ -1,0 +1,6 @@
+.auth-shell { width: min(100% - 2rem, 29rem); margin: clamp(1.5rem, 9vh, 6rem) auto; }
+.auth-shell > .brand { display: inline-flex; margin-bottom: 1.2rem; }
+.auth-shell .settings-form { grid-template-columns: 1fr; }
+.auth-shell .settings-form button { justify-self: start; }
+.auth-shell .panel > header h1 { font-size: 1.4rem; }
+.auth-provider-list { display: grid; gap: .5rem; padding-top: 1rem; margin-top: 1rem; border-top: 1px solid var(--line); }

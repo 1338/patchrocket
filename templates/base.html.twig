@@ -1,0 +1,72 @@
+{% set settings_sections = {
+    connections: 'Connections',
+    discovery: 'Service discovery',
+    integrations: 'Delivery integrations',
+    secrets: 'Secrets managers',
+    providers: 'AI providers',
+    scanning: 'Scanning',
+    policy: 'Policy and rollout',
+    access: 'Access control'
+} %}
+{% set dashboard_role = app.request.attributes.get('_dashboard_role') ?? 'admin' %}
+{% set dashboard_identity = app.request.attributes.get('_dashboard_identity') %}
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Overview{% endblock %} · PatchRocket</title>
+    <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="shell">
+    <aside class="sidebar">
+        <a class="brand" href="{{ path('overview') }}"><span class="brand-icon" aria-hidden="true">⌁</span>Patch<span>Rocket</span></a>
+        {% set route = app.request.attributes.get('_route') %}
+        <nav aria-label="Workspace">
+            {% for entry in [
+                {name:'overview', label:'Overview', icon:'◫', related:['overview']},
+                {name:'assets', label:'Asset inventory', icon:'▤', related:['assets','asset']},
+                {name:'findings', label:'Vulnerabilities', icon:'◇', related:['findings','finding']},
+                {name:'changes', label:'Remediations', icon:'↻', related:['changes','change']},
+                {name:'binaries', label:'Standalone executables', icon:'▣', related:['binaries']},
+                {name:'fleet', label:'Fleet', icon:'▦', related:['fleet']}
+            ] %}
+            <a href="{{ path(entry.name) }}"{% if route in entry.related %} aria-current="page"{% endif %}><span aria-hidden="true">{{ entry.icon }}</span>{{ entry.label }}</a>
+            {% endfor %}
+            {% if dashboard_role == 'admin' %}
+            <div class="sidebar-settings">
+                <a href="{{ path('settings') }}"{% if route == 'settings' %} aria-current="page"{% elseif route starts with 'settings_' %} class="sidebar-section-active"{% endif %}><span aria-hidden="true">⚙</span>Settings</a>
+                <ul class="sidebar-subnav" aria-label="Settings sections">
+                    {% for key, label in settings_sections %}
+                    {% set section_route = 'settings_' ~ key %}
+                    <li><a href="{{ path(section_route) }}"{% if route == section_route %} aria-current="page"{% endif %}>{{ label }}</a></li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </nav>
+        {% if dashboard_identity %}
+        <div class="sidebar-account">
+            <a class="anywhere" href="{{ path('auth_account') }}">{{ dashboard_identity }}<small>{{ dashboard_role == 'admin' ? 'Administrator' : dashboard_role|capitalize }}</small></a>
+            <form method="post" action="{{ path('auth_logout') }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('dashboard-logout') }}">
+                <button class="button secondary">Sign out</button>
+            </form>
+        </div>
+        {% else %}
+        <div class="sidebar-foot"><i aria-hidden="true"></i> Local operator console</div>
+        {% endif %}
+    </aside>
+    <main id="main" tabindex="-1">
+        {% for message in app.flashes('error') %}<p class="notice" role="alert">{{ message }}</p>{% endfor %}
+        {% for message in app.flashes('success') %}<p class="notice success" role="status">{{ message }}</p>{% endfor %}
+        {% block content %}{% endblock %}
+    </main>
+</div>
+{% if route in ['settings_access', 'settings_connections', 'settings_discovery', 'settings_integrations', 'settings_providers', 'settings_secrets'] %}
+<script src="/settings-credentials.js" defer></script>
+{% endif %}
+</body>
+</html>

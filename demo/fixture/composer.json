@@ -1,0 +1,17 @@
+{
+    "name": "patchrocket/fixture",
+    "description": "Synthetic compatibility and advisory demonstration",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "demo/clock": "1.0.0",
+        "demo/slugger": "1.0.0"
+    },
+    "autoload": {
+        "psr-4": {"Fixture\\": "src/"}
+    },
+    "repositories": [
+        {"type": "path", "url": "packages/*", "options": {"symlink": false}},
+        {"packagist.org": false}
+    ]
+}

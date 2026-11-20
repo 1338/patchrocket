@@ -1,0 +1,36 @@
+{% extends 'settings/_layout.html.twig' %}
+{% import 'settings/_forms.html.twig' as form %}
+{% set section = 'scanning' %}
+
+{% block settings_content %}
+<section class="panel">
+    <header><h2>Scanner and worker</h2></header>
+    <form class="settings-content settings-form" method="post" action="{{ path('settings_update', {action:'worker'}) }}">
+        {{ form.token('worker') }}
+        <label>Worker image<input name="image" required value="{{ worker.image }}"><small>Automatic Go checks require a Go toolchain compatible with the patched module. The bundled worker includes Go; choose a custom worker image for other toolchain versions.</small></label>
+        <label>Dependency resolver Docker network<input name="network" required value="{{ worker.network }}"></label>
+        <small>Use <code>none</code> for offline resolution or an approved bridge network for dependency downloads.</small>
+        <div><button class="button">Save worker settings</button></div>
+    </form>
+    <form class="settings-content settings-form" method="post" action="{{ path('settings_update', {action:'scanner'}) }}">
+        {{ form.token('scanner') }}
+        <label>Trivy scan timeout in seconds<input name="timeout" type="number" min="30" max="900" required value="{{ scanner.timeout }}"></label>
+        <div><button class="button">Save scanner settings</button></div>
+    </form>
+</section>
+<section class="panel">
+    <header><h2>Recurring scans</h2></header>
+    <div class="settings-content">
+        <form class="settings-form" method="post" action="{{ path('settings_update', {action:'scan-schedule'}) }}">
+            {{ form.token('scan-schedule') }}
+            {{ form.selectAssets(assets, 'asset', 'Target', ['image','repository']) }}
+            <label>Interval in minutes<input name="minutes" type="number" min="5" max="43200" required value="60"></label>
+            <div><button class="button">Save schedule</button></div>
+        </form>
+        {% for scan in scans %}
+        <div class="asset-row"><span><strong>{{ scan.name }}</strong><small>Every {{ scan.interval_seconds / 60 }} minutes · {{ scan.data.outcome ?? 'Waiting for first scan' }}</small></span>
+        <form method="post" action="{{ path('settings_update', {action:'scan-remove'}) }}">{{ form.token('scan-remove') }}<input type="hidden" name="asset" value="{{ scan.id }}"><button class="button secondary">Remove schedule</button></form></div>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,281 @@
+<?php
+declare(strict_types=1);
+
+namespace App\Remediation;
+
+use App\Asset\Inventory;
+use App\Audit\Store;
+use App\Discovery\Repository;
+use App\Discovery\JenkinsBuilds;
+use App\Secrets\ManagedGit;
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
+use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Component\Workflow\WorkflowInterface;
+
+final class Changes
+{
+    public function __construct(
+        private readonly Store $store,
+        private readonly Inventory $inventory,
+        private readonly Repository $repository,
+        private readonly ComposerUpgrade $composer,
+        private readonly DockerBaseUpgrade $docker,
+        private readonly NpmUpgrade $npm,
+        private readonly MessageBusInterface $bus,
+        private readonly ApprovalPolicy $approval,
+        private readonly ManagedGit $git,
+        #[Autowire(service: 'state_machine.changes')] private readonly WorkflowInterface $workflow,
+        private readonly ?IacImageUpgrade $iac = null,
+    ) {
+    }
+
+    public function strategy(string $name): Strategy
+    {
+        return match ($name) {
+            'composer' => $this->composer,
+            'docker-base' => $this->docker,
+            'npm' => $this->npm,
+            default => throw new \InvalidArgumentException('Unknown remediation strategy.'),
+        };
+    }
+
+    public function queue(string $findingId, string $strategy = 'composer', ?string $repository = null, array $options = [], bool $reuse = false): string
+    {
+        $finding = $this->store->row('SELECT * FROM findings WHERE id = ? AND active = 1', [$findingId]);
+        if (!$finding) {
+            throw new \DomainException('The finding is no longer active.');
+        }
+        $scanned = $this->inventory->get($finding['asset_id']) ?? throw new \DomainException('The scanned asset is no longer registered.');
+        if ('iac-image' === $strategy) {
+            return $this->queueIac($finding, $scanned, $repository, $options, $reuse);
+        }
+        if ('docker-base' === $strategy && !empty($options['base'])) {
+            return $this->queueTracedDocker($finding, $scanned, $repository, $options, $reuse);
+        }
+        $asset = $this->inventory->get($repository ?? $scanned['id']);
+        if ('repository' !== ($asset['kind'] ?? null)) {
+            throw new \DomainException('A registered source repository is required.');
+        }
+        if ('infrastructure' === ($asset['data']['role'] ?? null)) {
+            throw new \DomainException('Infrastructure repositories are assessed through static inventory.');
+        }
+        if (null !== ($asset['data']['subdirectory'] ?? null)) {
+            throw new \DomainException('Subdirectory registrations currently support assessment and repository links only.');
+        }
+        $revision = $this->repository->revision($asset['data']['path']);
+        if (in_array($strategy, ['composer', 'npm'], true) && ($asset['id'] !== $scanned['id'] || $revision !== ($asset['data']['revision'] ?? null))) {
+            throw new \DomainException('Scan the current repository revision before preparing a dependency patch.');
+        }
+        if ('docker-base' === $strategy && ('image' !== $scanned['kind'] || !$this->store->row(
+            "SELECT source_id FROM asset_links WHERE source_id = ? AND target_id = ? AND kind = 'BUILT_FROM'",
+            [$scanned['id'], $asset['id']],
+        ))) {
+            throw new \DomainException('Associate the affected image with this source repository first.');
+        }
+        if ('npm' === $strategy && $asset['data']['demo']) {
+            throw new \DomainException('The synthetic fixture supports Composer upgrades.');
+        }
+        $plan = $this->strategy($strategy)->plan($finding['data'], $options);
+        return $this->dispatch($asset, $finding, $strategy, $revision, $plan, reuse: $reuse);
+    }
+
+    public function tracedDockerSource(array $image): array
+    {
+        $sources = [];
+        foreach ($image['data']['build_sources'] ?? [] as $source) {
+            if (empty($source['repository']) || empty($source['revision']) || empty($source['dockerfile'])) {
+                continue;
+            }
+            $sources[$source['repository'].'/'.$source['revision'].'/'.$source['dockerfile']] = $source;
+        }
+        if ('image' !== $image['kind'] || 1 !== count($sources)) {
+            throw new \DomainException('Remediation needs a unique Dockerfile traced from the deployed image.');
+        }
+        $source = reset($sources);
+        $asset = $this->inventory->get($source['repository']);
+        if (($asset['kind'] ?? null) !== 'repository' || ($asset['data']['role'] ?? null) === 'infrastructure'
+            || isset($asset['data']['subdirectory'])) {
+            throw new \DomainException('Choose the registered root checkout of the traced source repository.');
+        }
+        $url = ($asset['data']['canonical_url'] ?? '') ?: ($asset['data']['source_url'] ?? '');
+        if (!preg_match('~^https://[a-zA-Z0-9.-]+(?::[0-9]+)?/(?:[a-zA-Z0-9._-]+/)+[a-zA-Z0-9._-]+\.git$~D', $url)) {
+            throw new \DomainException('Configure the traced repository’s canonical HTTPS Git URL.');
+        }
+
+        return ['source' => $source, 'asset' => $asset, 'url' => $url];
+    }
+
+    public function infrastructureImageSource(array $image): ?array
+    {
+        return $this->iac?->target($image);
+    }
+
+    private function queueIac(array $finding, array $image, ?string $repository, array $options, bool $reuse): string
+    {
+        $target = $this->infrastructureImageSource($image);
+        if (!$target) {
+            throw new \DomainException('The running image needs a unique Deployment manifest in a linked infrastructure repository.');
+        }
+        ['source' => $source, 'asset' => $asset, 'url' => $url] = $target;
+        if (null !== $repository && $repository !== $asset['id']) {
+            throw new \DomainException('Choose the infrastructure repository traced from this deployment.');
+        }
+        $branch = $options['base'] ?? '';
+        if (!preg_match('~^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,100}$~D', $branch)) {
+            throw new \DomainException('Enter the infrastructure branch to patch.');
+        }
+        $plan = $this->iac->plan($source, $image, $options['fixed'] ?? '');
+        $queue = function (string $path, string $revision) use ($asset, $finding, $plan, $url, $branch, $reuse): string {
+            $this->iac->edit($this->repository->committedFile($path, $revision, $plan['file']), $plan);
+            $asset['data']['path'] = $path;
+
+            return $this->dispatch($asset, $finding, 'iac-image', $revision, $plan, [
+                'source_url' => $url, 'base_branch' => $branch,
+            ], $reuse);
+        };
+        if (!empty($options['credential'])) {
+            return $this->git->checkout($options['credential'], $url,
+                fn (string $path): string => $queue($path, $this->repository->revision($path)), 'refs/heads/'.$branch);
+        }
+        $path = $asset['data']['path'];
+
+        return $queue($path, $this->repository->branchRevision($path, $branch));
+    }
+
+    private function queueTracedDocker(array $finding, array $image, ?string $repository, array $options, bool $reuse): string
+    {
+        ['source' => $source, 'asset' => $asset, 'url' => $url] = $this->tracedDockerSource($image);
+        if (null !== $repository && $repository !== $asset['id']) {
+            throw new \DomainException('Choose the registered root checkout of the traced source repository.');
+        }
+        $base = $options['base'];
+        $queue = function (string $path, string $revision) use ($asset, $source, $image, $finding, $options, $url, $base, $reuse): string {
+            $imageName = explode('@', $image['data']['digest'], 2)[0];
+            $builds = JenkinsBuilds::inspect($this->repository->buildFiles($path, $revision))[$imageName] ?? [];
+            if (1 !== count($builds) || $builds[0]['dockerfile'] !== $source['dockerfile']) {
+                throw new \DomainException('The requested branch does not uniquely build this image from the traced Dockerfile.');
+            }
+            $advisories = [];
+            foreach ($this->store->iterate('SELECT data FROM findings WHERE asset_id = ? AND active = 1', [$image['id']]) as $row) {
+                if ($row['data']['package'] === $finding['data']['package'] && !empty($row['data']['fixed'])) {
+                    $advisories[] = $row['data']['advisory'];
+                }
+            }
+            sort($advisories, SORT_STRING);
+            $plan = $this->docker->plan($finding['data'], $options + [
+                'dockerfile' => $source['dockerfile'], 'platform' => $image['data']['platform'] ?? '',
+                'advisories' => array_values(array_unique($advisories)),
+            ]);
+            if ($reuse) {
+                $dockerfile = $this->repository->committedFile($path, $revision, $source['dockerfile']);
+                $this->docker->updatedDockerfile($dockerfile, $plan);
+            }
+            $asset['data']['path'] = $path;
+
+            return $this->dispatch($asset, $finding, 'docker-base', $revision, $plan, [
+                'source_url' => $url, 'base_branch' => $base, 'observed_image' => $image['data']['digest'],
+            ], $reuse);
+        };
+        $reference = $options['credential'] ?? null;
+        if (null !== $reference) {
+            return $this->git->checkout($reference, $url, fn (string $path): string => $queue($path, $this->repository->revision($path)), 'refs/heads/'.$base);
+        }
+
+        $path = $asset['data']['path'];
+
+        return $queue($path, $this->repository->branchRevision($path, $base));
+    }
+
+    public function queueBinary(array $source, string $base, array $plan, string $title): string
+    {
+        return $this->dispatch($source, null, 'standalone-binary', $base, $plan, ['title' => $title]);
+    }
+
+    private function dispatch(array $asset, ?array $finding, string $strategy, string $revision, array $plan, array $metadata = [], bool $reuse = false): string
+    {
+        $id = bin2hex(random_bytes(12));
+        $findingId = $finding['id'] ?? '';
+        $data = [
+            'plan' => $plan, 'finding' => $finding['data'] ?? [], 'source' => $finding['source'] ?? 'Operator source link',
+            'repository' => $asset['data']['path'], 'revision' => $revision,
+            'editable' => $asset['data']['editable'], 'demo' => $asset['data']['demo'],
+        ] + $metadata;
+
+        if ($reuse) {
+            $target = !empty($plan['nginx_overlay']) ? ($metadata['observed_image'] ?? $findingId) : $findingId;
+            $id = substr(hash('sha256', Store::json([$asset['id'], $target, $strategy, $revision, $plan, $metadata])), 0, 24);
+        }
+
+        return $this->store->db->transactional(function () use ($id, $findingId, $asset, $strategy, $data): string {
+            while (0 === $this->store->db->executeStatement(
+                'INSERT INTO changes (id, asset_id, finding_id, strategy, status, created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING',
+                [$id, $asset['id'], $findingId, $strategy, 'queued', gmdate(DATE_ATOM), Store::json($data)],
+            )) {
+                $existing = $this->store->db->fetchOne('SELECT status FROM changes WHERE id = ?', [$id]);
+                if (!in_array($existing, ['failed', 'rolled_back'], true)) {
+                    return $id;
+                }
+                $id = substr(hash('sha256', $id), 0, 24);
+            }
+            $note = '' === $findingId ? 'Build queued from the linked source and fixing commit.' : 'Plan created from the observed finding.';
+            $this->store->record($id, 'transition', ['to' => 'queued', 'note' => $note]);
+            $this->bus->dispatch(new RunChange($id));
+
+            return $id;
+        });
+    }
+
+    public function get(string $id): ?Change
+    {
+        $record = $this->store->row('SELECT * FROM changes WHERE id = ?', [$id]);
+
+        return $record ? new Change($id, $record['strategy'], $record['status'], $record['data']) : null;
+    }
+
+    public function approve(Change $change): void
+    {
+        if ('awaiting_approval' !== $change->getStatus()) {
+            throw new \DomainException('The change must pass verification before approval.');
+        }
+        $this->approval->check($change);
+        $note = match ($change->strategy) {
+            'standalone-binary' => 'Verified executable approved for rollout by the local operator.',
+            'iac-image' => 'Verified infrastructure image update approved by the local operator.',
+            default => 'Approved for a controlled build by the local operator.',
+        };
+        if (!$this->move($change, 'approve', $note)) {
+            throw new \DomainException('The change status advanced before approval.');
+        }
+    }
+
+    public function move(Change $change, string $transition, string $note): bool
+    {
+        $previous = $change->getStatus();
+        if (!$this->workflow->can($change, $transition)) {
+            return false;
+        }
+        $this->workflow->apply($change, $transition);
+        $next = $change->getStatus();
+
+        try {
+            $saved = $this->store->db->transactional(function () use ($change, $previous, $next, $note): bool {
+                $rows = $this->store->db->update('changes', [
+                    'status' => $next, 'data' => Store::json($change->data),
+                ], ['id' => $change->id, 'status' => $previous]);
+                if (1 === $rows) {
+                    $this->store->record($change->id, 'transition', ['to' => $next, 'note' => $note]);
+                }
+
+                return 1 === $rows;
+            });
+        } catch (\Throwable $exception) {
+            $change->setStatus($previous);
+            throw $exception;
+        }
+        if (!$saved) {
+            $change->setStatus($previous);
+        }
+
+        return $saved;
+    }
+}

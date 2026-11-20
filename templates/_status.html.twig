@@ -1,0 +1,2 @@
+{% set labels = {awaiting_approval: 'Ready for approval', approved: 'Approved for build', release_verified: 'Release verified', binary_approved: 'Approved for installation', binary_deployed: 'Installation verified', monitoring: 'Awaiting runtime evidence', rolling_out: 'Rolling out', deployed: 'Running digest verified', rolling_back: 'Rolling back', rolled_back: 'Rolled back'} %}
+<span class="status {{ status }}">{{ labels[status] ?? status|capitalize }}</span>

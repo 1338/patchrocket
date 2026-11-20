@@ -1,0 +1,44 @@
+{% extends 'base.html.twig' %}
+{% block title %}Fleet{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>Fleet</h1><p>Prioritize advisories by severity and observed running exposure.</p></div></header>
+<section class="metrics" aria-label="Remediation outcomes">
+    {% for label, value in {'Attempts':history.attempts, 'Verified patches':history.verified_patches, 'Running digest verified':history.deployed, 'Failed attempts':history.failed} %}
+    <div class="metric"><small>{{ label }}</small><strong>{{ value }}</strong></div>
+    {% endfor %}
+</section>
+<section class="panel">
+    <header><h2>Advisory impact</h2></header>
+    {% if exposure %}
+    <div class="table-wrap"><table><thead><tr><th>Advisory</th><th>Severity</th><th>Observed running</th><th>Source repositories</th><th>Fix available</th></tr></thead><tbody>
+    {% for group in exposure|slice(0, 100) %}
+    <tr>
+        <td><a class="primary-link" href="{{ path('findings', {advisory:group.advisory, view:'assets'}) }}">{{ group.advisory }}</a><small>{{ group.package }}</small></td>
+        <td>{{ ['Unknown','Low','Medium','High','Critical'][group.rank] }}</td>
+        <td>{{ group.running|length }} containers · {{ group.workloads|length }} workloads
+        {% for id, name in group.running %}<small><a href="{{ path('asset', {id:id}) }}">{{ name }}</a></small>{% endfor %}</td>
+        <td>{% for id, name in group.repositories %}<small><a href="{{ path('asset', {id:id}) }}">{{ name }}</a></small>{% else %}—{% endfor %}</td>
+        <td>{{ group.fix_available ? 'Yes' : 'Unavailable' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody></table></div>
+    {% else %}<p class="empty">No active findings.</p>{% endif %}
+</section>
+<section class="panel">
+    <header><h2>Shared dependencies</h2></header>
+    {% for package, assets in shared|slice(0, 100) %}
+    <details class="asset-row"><summary>{{ package }} · {{ assets|length }} assets</summary>
+    <ul>{% for id, versions in assets %}<li><a href="{{ path('asset', {id:id}) }}">{{ id|slice(0, 12) }}</a> · {{ versions|join(', ') }}</li>{% endfor %}</ul></details>
+    {% else %}<p class="empty">Shared dependencies appear after the same package is observed in multiple SBOMs.</p>{% endfor %}
+</section>
+{% if history.months %}
+<section class="panel">
+    <header><h2>Remediation history</h2>{% if history.median_seconds_to_running is not null %}<small>Median to verified runtime {{ (history.median_seconds_to_running / 60)|round(1) }} min</small>{% endif %}</header>
+    <div class="table-wrap"><table><thead><tr><th>Attempt month (UTC)</th><th>Attempts</th><th>Verified patches</th><th>Verified deployments</th><th>Failed</th><th>Rollbacks</th></tr></thead><tbody>
+    {% for month, period in history.months %}
+    <tr><td>{{ month }}</td><td>{{ period.attempts }}</td><td>{{ period.verified }}</td><td>{{ period.deployed }}</td><td>{{ period.failed }}</td><td>{{ period.rollbacks }}</td></tr>
+    {% endfor %}
+    </tbody></table></div>
+</section>
+{% endif %}
+{% endblock %}

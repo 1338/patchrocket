@@ -1,0 +1,27 @@
+{% extends 'base.html.twig' %}
+{% block title %}Asset inventory{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>Asset inventory</h1><p>Browse observed infrastructure, container images, and source repositories.</p></div></header>
+<form method="get" action="{{ path('assets') }}" class="filters asset-search" role="search">
+    {% if kind %}<input type="hidden" name="kind" value="{{ kind }}">{% endif %}
+    <label for="asset-name">Asset name</label>
+    <input id="asset-name" type="search" name="q" value="{{ search }}" placeholder="Search names">
+    <button class="button">Search</button>
+    {% if search %}<a class="button secondary" href="{{ path('assets', {kind:kind}) }}">Clear search</a>{% endif %}
+</form>
+<div class="filters" aria-label="Filter by asset type">
+    <a class="button {{ not kind ? 'selected' : 'secondary' }}" href="{{ path('assets', {q:search}) }}">All assets</a>
+    {% for type in kinds %}<a class="button {{ kind == type ? 'selected' : 'secondary' }}" href="{{ path('assets', {kind:type,q:search}) }}">{{ type|capitalize }}</a>{% endfor %}
+</div>
+<section class="panel">
+{% if assets %}
+<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Type</th><th>Last observed</th><th>Scan source</th></tr></thead><tbody>
+{% for asset in assets %}
+<tr><td><a class="primary-link anywhere" href="{{ path('asset', {id:asset.id}) }}">{{ asset.name }}</a></td><td>{{ asset.kind|capitalize }}</td>
+<td><time datetime="{{ asset.observed_at }}">{{ asset.observed_at|date('M j, H:i', 'UTC') }} UTC</time></td>
+<td>{% if asset.data.scan_outcome == 'failed' %}Last scan failed{% elseif asset.data.scan_source is defined %}{{ asset.data.scan_source }}{% elseif asset.kind in ['image','linux','repository'] %}Unscanned{% else %}—{% endif %}</td></tr>
+{% endfor %}
+</tbody></table></div>
+{% else %}<p class="empty">{{ search ? 'No asset names match your search.' : 'No assets in this view.' }}</p>{% endif %}
+</section>
+{% endblock %}

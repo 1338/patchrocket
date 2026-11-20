@@ -1,0 +1,46 @@
+{% extends 'settings/_layout.html.twig' %}
+{% import 'settings/_forms.html.twig' as form %}
+{% set section = 'policy' %}
+
+{% block settings_content %}
+<section class="panel">
+    <header><h2>Approval policies</h2></header>
+    <div class="settings-content">
+        <form class="settings-form" method="post" action="{{ path('settings_update', {action:'policy'}) }}">
+            {{ form.token('policy') }}
+            {{ form.selectAssets(assets, 'repository', 'Repository', ['repository']) }}
+            <fieldset><legend>Allowed strategies</legend>
+                {% for strategy, label in {composer:'Composer',npm:'npm','docker-base':'Docker base','iac-image':'Infrastructure image','standalone-binary':'Standalone executable'} %}
+                <label class="check-filter"><input type="checkbox" name="strategies[]" value="{{ strategy }}" checked> {{ label }}</label>
+                {% endfor %}
+            </fieldset>
+            <label class="check-filter"><input type="checkbox" name="independent" value="1"> Require independent verification</label>
+            <div><button class="button">Save policy</button></div>
+        </form>
+        {% for policy in policies %}<p>{{ policy.name }} · {{ policy.data.strategies ? policy.data.strategies|join(', ') : 'All strategies held' }}{% if policy.data.independent %} · Independent verification required{% endif %}</p>{% endfor %}
+    </div>
+</section>
+
+<section class="panel">
+    <header><h2>Rollout schedules</h2></header>
+    <div class="settings-content">
+        {% if staged %}
+        <form method="post" action="{{ path('settings_update', {action:'rollout'}) }}" class="settings-form">
+            {{ form.token('rollout') }}
+            <label>Staged change<select name="change" required>{% for row in staged %}<option value="{{ row.id }}">{{ row.id }} · {{ row.strategy }}</option>{% endfor %}</select></label>
+            <label>Previous Docker container<input name="previous" required></label>
+            <label>Replacement Docker container<input name="replacement" required></label>
+            <label>Earliest time<input name="not_before" required placeholder="2026-11-21T12:00:00+01:00"></label>
+            <label>Canary<select name="canary"><option value="">None</option>{% for row in canaries %}<option value="{{ row.id }}">{{ row.id }} · {{ row.status }}</option>{% endfor %}</select></label>
+            <div><button class="button">Schedule rollout</button></div>
+        </form>
+        {% endif %}
+        {% for rollout in rollouts %}
+        <div class="asset-row"><span><a href="{{ path('change', {id:rollout.id}) }}">{{ rollout.id }}</a><small>{{ rollout.status|capitalize }} · {{ rollout.not_before|date('M j, H:i', 'UTC') }} UTC</small></span>
+        {% if rollout.status == 'scheduled' and rollout.lease_until == 0 %}
+        <form method="post" action="{{ path('settings_update', {action:'rollout-cancel'}) }}">{{ form.token('rollout-cancel') }}<input type="hidden" name="change" value="{{ rollout.id }}"><button class="button secondary">Cancel rollout</button></form>
+        {% endif %}</div>
+        {% else %}<p>No rollouts scheduled.</p>{% endfor %}
+    </div>
+</section>
+{% endblock %}

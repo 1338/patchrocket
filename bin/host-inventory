@@ -1,0 +1,40 @@
+#!/bin/sh
+# Read-only package inventory. This file also runs over SSH through stdin.
+set -eu
+export LC_ALL=C
+printf 'PATCHROCKET-HOST\t1\n'
+printf 'hostname\t%s\n' "$(hostname)"
+printf 'collected_at\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'kernel\t%s\n' "$(uname -r)"
+if [ -r /etc/os-release ]; then
+    awk '/^(PRETTY_NAME|ID|VERSION_ID)=/ { key=$0; sub(/=.*/, "", key); sub(/^[^=]*=/, ""); gsub(/^"|"$/, ""); printf "%s\t%s\n", key, $0 }' /etc/os-release
+fi
+if command -v dpkg-query >/dev/null 2>&1; then
+    printf 'manager\tAPT\n'
+    installed="$(dpkg-query -W -f='${Status}\t${binary:Package}\t${Version}\n')"
+    printf '%s\n' "$installed" | awk -F '\t' '$1 == "install ok installed" { printf "package\t%s\t%s\n", $2, $3 }'
+elif command -v rpm >/dev/null 2>&1; then
+    if command -v zypper >/dev/null 2>&1; then
+        printf 'manager\tZypper\n'
+    else
+        printf 'manager\tDNF\n'
+    fi
+    rpm -qa --qf 'package\t%{NAME}.%{ARCH}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\n'
+elif command -v apk >/dev/null 2>&1 && [ -r /lib/apk/db/installed ]; then
+    printf 'manager\tAPK\n'
+    awk '/^P:/ {p=substr($0,3)} /^V:/ && p {printf "package\t%s\t%s\n",p,substr($0,3);p=""}' /lib/apk/db/installed
+elif command -v pacman >/dev/null 2>&1; then
+    printf 'manager\tPacman\n'
+    installed="$(pacman -Q)"
+    printf '%s\n' "$installed" | awk '{printf "package\t%s\t%s\n",$1,$2}'
+else
+    printf 'manager\tUnknown\n'
+fi
+tools=''
+for tool in docker podman kubectl k3s microk8s kubelet; do
+    if command -v "$tool" >/dev/null 2>&1; then
+        tools="${tools:+$tools, }$tool"
+    fi
+done
+printf 'tools\t%s\n' "$tools"
+printf 'END\n'

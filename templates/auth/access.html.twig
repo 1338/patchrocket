@@ -1,0 +1,92 @@
+{% extends 'base.html.twig' %}
+{% import 'settings/_forms.html.twig' as form %}
+{% block title %}Access{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Access</h1><a href="{{ path('settings') }}">Settings</a></header>
+{% if not enabled %}
+<section class="panel">
+    <header><h2>Enable dashboard sign-in</h2></header>
+    <div class="settings-content">
+        <p>Generate a one-time setup code on the PatchRocket host and use it to create the first administrator.</p>
+        <p><code>php bin/console patchrocket:auth bootstrap</code></p>
+        <p><a href="{{ path('auth_setup') }}">Open setup</a></p>
+    </div>
+</section>
+{% else %}
+{% if editing_account or access_view == 'account' %}
+<section class="panel"><header><h2>{{ editing_account ? 'Edit local account' : 'Add local account' }}</h2></header><div class="settings-content">
+        <form class="settings-form" method="post" action="{{ path('settings_access_edit', {action:'account'}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('dashboard-access-account') }}">
+            <label>Username<input name="username" required maxlength="40" value="{{ editing_account.username ?? '' }}"{% if editing_account %} readonly{% endif %}></label>
+            <label>Password<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="72"{% if not editing_account %} required{% else %} placeholder="Leave blank to keep the password"{% endif %}></label>
+            <label>Role<select name="role">{% for role, label in roles %}<option value="{{ role }}"{% if role == editing_account.role|default('viewer') %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+            <div class="actions"><button class="button">{{ editing_account ? 'Save account' : 'Add account' }}</button><a href="{{ path('settings_access') }}">Cancel</a></div>
+        </form>
+        <small>Viewers can read inventory and findings. Operators can queue patches, track releases, and download artifacts. Administrators manage settings and approve changes.</small>
+</div></section>
+{% elseif editing_provider or access_view == 'provider' %}
+{% set selected_type = editing_provider.type ?? provider_type %}
+<section class="panel"><header><h2>{{ editing_provider ? 'Edit identity provider' : 'Add identity provider' }}</h2><a href="{{ path('settings_access') }}">Back to access</a></header><div class="settings-content">
+{% if not selected_type %}
+<p>Step 1 of 2 · Choose an authentication type</p>
+<form class="settings-form" method="get" action="{{ path('settings_access') }}">
+<input type="hidden" name="add" value="provider">
+<label>Authentication type<select name="type" required><option value="">Select a type</option>{% for key, label in types %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select></label>
+<div class="actions"><button class="button">Continue</button><a href="{{ path('settings_access') }}">Cancel</a></div>
+</form>
+{% else %}
+<p>{{ editing_provider ? types[selected_type] : 'Step 2 of 2 · Configure ' ~ types[selected_type] }}</p>
+{% if not editing_provider %}<p><a href="{{ path('settings_access', {add:'provider'}) }}">Change authentication type</a></p>{% endif %}
+        <form class="settings-form" method="post" action="{{ path('settings_access_edit', {action:'provider'}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('dashboard-access-provider') }}">
+            <label>Provider alias<input name="alias" maxlength="32" pattern="[a-z0-9][a-z0-9\-]{0,31}" placeholder="company-sso" value="{{ editing_provider.alias ?? '' }}"{% if editing_provider %} readonly{% endif %} required></label>
+            <input type="hidden" name="type" value="{{ selected_type }}">
+            {% if selected_type in ['oidc', 'microsoft'] %}<label>{{ selected_type == 'microsoft' ? 'Entra tenant ID or tenant-specific issuer' : 'OIDC issuer URL' }}<input name="issuer" maxlength="512" value="{{ editing_provider.issuer ?? '' }}" placeholder="{{ selected_type == 'microsoft' ? 'Tenant UUID' : 'https://identity.example.com/realms/team' }}" required></label>{% endif %}
+            <label>Client ID<input name="client_id" maxlength="255" value="{{ editing_provider.client_id ?? '' }}" required></label>
+            {{ form.credential('reference', 'Managed client secret', editing_provider.reference ?? '', vault_destinations, 'identity') }}
+            <label>Or enter an encrypted local client secret<input type="password" name="secret" maxlength="4096" autocomplete="new-password" placeholder="{{ editing_provider.has_secret|default ? 'Client secret saved' : '' }}"></label>
+            <label>Additional scopes<input name="additional_scopes" maxlength="255" value="{{ editing_provider.additional_scopes ?? '' }}" placeholder="groups email"></label>
+            <label>Unmapped accounts<select name="default_role"><option value="">Deny access</option><option value="viewer"{% if editing_provider.default_role|default == 'viewer' %} selected{% endif %}>Viewer</option></select></label>
+            <label>Subject role mappings<textarea name="subjects" rows="3" placeholder="provider-subject-id=operator">{% for value, role in editing_provider.subjects|default([]) %}{{ value }}={{ role ?: 'deny' }}{{ "\n" }}{% endfor %}</textarea></label>
+            {% if selected_type not in ['github', 'facebook'] %}<label>OIDC claim name<input name="claim" maxlength="64" value="{{ editing_provider.claim ?? '' }}" placeholder="groups"></label>
+            <label>OIDC claim role mappings<textarea name="claims" rows="3" placeholder="release-engineering=operator">{% for value, role in editing_provider.claims|default([]) %}{{ value }}={{ role ?: 'deny' }}{{ "\n" }}{% endfor %}</textarea></label>
+            {% endif %}
+            <small>Register <code>/login/ALIAS/callback</code> on this dashboard’s origin as the callback URL. Use one mapping per line as value=viewer, value=operator, value=admin or value=deny. Subject mappings take precedence.</small>
+            <div class="actions"><button class="button">{{ editing_provider ? 'Save provider' : 'Add provider' }}</button><a href="{{ path('settings_access') }}">Cancel</a></div>
+        </form>
+{% endif %}
+</div></section>
+{% else %}
+<section class="panel"><header><h2>Local accounts <small>({{ accounts|length }})</small></h2><a class="button" href="{{ path('settings_access', {add:'account'}) }}">Add account</a></header><div class="settings-content">
+<p>Dashboard accounts that sign in with a username and password.</p>
+        {% for account in accounts %}
+        <div class="asset-row"><span>{{ account.username }}<small>{{ roles[account.role] }}</small></span><div class="actions">
+            <a href="{{ path('settings_access', {account:account.username}) }}">Edit</a>
+            {% if not account.bootstrap %}
+            <form method="post" action="{{ path('settings_access_edit', {action:'account-remove'}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('dashboard-access-account-remove') }}">
+                <input type="hidden" name="username" value="{{ account.username }}">
+                <button class="button secondary">Remove</button>
+            </form>
+            {% endif %}
+        </div></div>
+        {% endfor %}
+{% if not accounts %}<p>No local accounts configured.</p>{% endif %}
+</div></section>
+<section class="panel"><header><h2>Identity providers <small>({{ providers|length }})</small></h2><a class="button" href="{{ path('settings_access', {add:'provider'}) }}">Add identity provider</a></header><div class="settings-content">
+<p>Enabled authentication providers for dashboard sign-in.</p>
+        {% for provider in providers %}
+        <div class="asset-row"><span>{{ provider.alias }}<small>Enabled · {{ types[provider.type] }} · <code>{{ url('auth_sso_callback', {provider:provider.alias}) }}</code></small></span><div class="actions">
+            <a href="{{ path('settings_access', {provider:provider.alias}) }}">Edit</a>
+            <form method="post" action="{{ path('settings_access_edit', {action:'provider-remove'}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('dashboard-access-provider-remove') }}">
+                <input type="hidden" name="alias" value="{{ provider.alias }}">
+                <button class="button secondary">Remove</button>
+            </form>
+        </div></div>
+        {% endfor %}
+{% if not providers %}<p>No identity providers enabled. Add a provider to offer single sign-on.</p>{% endif %}
+</div></section>
+{% endif %}
+{% endif %}
+{% endblock %}

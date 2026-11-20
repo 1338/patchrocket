@@ -1,0 +1,36 @@
+{% set errors = {
+    400: ['Bad request', 'Check the address and try again.'],
+    401: ['Sign-in required', 'Return to the dashboard to sign in.'],
+    403: edge_denied|default(false)
+        ? ['Local access only', 'Open PatchRocket through its configured dashboard address.']
+        : ['Access denied', 'Contact a PatchRocket administrator if you need access to this page.'],
+    404: ['Page not found', 'Check the address or return to the dashboard.'],
+    405: ['Action unavailable', 'Return to the dashboard and start the action again.'],
+    429: ['Too many requests', 'Wait a moment before trying again.'],
+    503: ['Service unavailable', 'Try again in a moment.']
+} %}
+{% set heading = errors[status_code][0] ?? (status_code >= 500 ? 'Something went wrong' : 'Request unavailable') %}
+{% set message = errors[status_code][1] ?? (status_code >= 500 ? 'You can return to the dashboard and try again.' : 'Return to the dashboard to continue.') %}
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>{{ heading }} · PatchRocket</title>
+    <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+<main class="error-screen">
+    <section class="panel error-card" aria-labelledby="error-heading">
+        <div class="brand" aria-label="PatchRocket"><span class="brand-icon" aria-hidden="true">⌁</span>Patch<span>Rocket</span></div>
+        <p class="kicker">HTTP {{ status_code }}</p>
+        <h1 id="error-heading">{{ heading }}</h1>
+        <p class="error-message">{{ message }}</p>
+        {% if not edge_denied|default(false) %}
+        <a class="button" href="/">Return to dashboard</a>
+        {% endif %}
+    </section>
+</main>
+</body>
+</html>

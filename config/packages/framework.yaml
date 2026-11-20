@@ -1,0 +1,45 @@
+framework:
+    secret: '%env(APP_SECRET)%'
+    http_method_override: false
+    http_client: true
+    trusted_hosts: '%env(DASHBOARD_TRUSTED_HOSTS)%'
+    trusted_proxies: '%env(DASHBOARD_TRUSTED_PROXIES)%'
+    trusted_headers: ['x-forwarded-for', 'x-forwarded-proto']
+    csrf_protection: true
+    session:
+        cookie_secure: auto
+        cookie_samesite: lax
+        cookie_httponly: true
+    messenger:
+        failure_transport: failed_jobs
+        transports:
+            jobs:
+                dsn: 'doctrine://default?queue_name=patches&auto_setup=false'
+                retry_strategy: { max_retries: 0 }
+            failed_jobs: 'doctrine://default?queue_name=failed&auto_setup=false'
+        routing:
+            'App\Remediation\RunChange': jobs
+            'App\Settings\RunInventory': jobs
+    workflows:
+        changes:
+            type: state_machine
+            supports: App\Remediation\Change
+            marking_store: { type: method, property: status }
+            initial_marking: queued
+            places: [queued, patching, verifying, adapting, awaiting_approval, approved, monitoring, rolling_out, deployed, rolling_back, rolled_back, failed]
+            transitions:
+                start: { from: queued, to: patching }
+                check: { from: patching, to: verifying }
+                adapt: { from: verifying, to: adapting }
+                recheck: { from: adapting, to: verifying }
+                verify: { from: verifying, to: awaiting_approval }
+                approve: { from: awaiting_approval, to: approved }
+                monitor: { from: approved, to: monitoring }
+                begin_rollout: { from: monitoring, to: rolling_out }
+                rollout_failed: { from: rolling_out, to: monitoring }
+                observe: { from: [monitoring, rolling_out], to: deployed }
+                verify_binary_installation: { from: approved, to: deployed }
+                verify_iac_rollout: { from: approved, to: deployed }
+                begin_rollback: { from: deployed, to: rolling_back }
+                confirm_rollback: { from: rolling_back, to: rolled_back }
+                fail: { from: [patching, verifying, adapting], to: failed }

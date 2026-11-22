@@ -11,6 +11,9 @@ use Symfony\Component\Process\Process;
 
 final class RolloutSchedules
 {
+    private const CANARY_READY = "c.strategy <> 'standalone-binary' AND (c.status = 'deployed'
+        OR (c.status IN ('monitoring', 'rolling_out') AND s.status = 'scheduled'))";
+
     public function __construct(
         private readonly Store $store,
         private readonly Changes $changes,
@@ -22,12 +25,11 @@ final class RolloutSchedules
     public function add(string $id, string $previous, string $replacement, \DateTimeImmutable $after, ?string $canary): void
     {
         $change = $this->changes->get($id);
-        if ('monitoring' !== $change?->getStatus()) {
+        if ('monitoring' !== $change?->getStatus() || empty($change->data['candidate_image'])) {
             throw new \DomainException('Schedule an approved change with a scanned and staged replacement.');
         }
-        if ($canary && ($canary === $id || 'standalone-binary' === $this->changes->get($canary)?->strategy
-            || (!$this->store->row('SELECT id FROM rollout_schedules WHERE id = ?', [$canary])
-            && 'deployed' !== $this->changes->get($canary)?->getStatus()))) {
+        if ($canary && ($canary === $id || !$this->store->db->fetchOne('SELECT c.id FROM changes c
+            LEFT JOIN rollout_schedules s ON s.id = c.id WHERE c.id = ? AND '.self::CANARY_READY, [$canary]))) {
             throw new \DomainException('Choose a scheduled or verified canary.');
         }
         $old = $this->infra->inspectContainer($previous);
@@ -63,6 +65,38 @@ final class RolloutSchedules
     public function all(): array
     {
         return $this->store->rows('SELECT * FROM rollout_schedules ORDER BY not_before, id');
+    }
+
+    public function changesForScheduling(): array
+    {
+        $candidate = $this->store->jsonText('c.data', 'candidate_image');
+        $title = $this->store->jsonText('c.data', 'title');
+
+        return $this->store->rows("SELECT c.id, c.strategy, $title AS title, a.name AS asset_name FROM changes c
+            LEFT JOIN assets a ON a.id = c.asset_id LEFT JOIN rollout_schedules s ON s.id = c.id
+            WHERE c.status = 'monitoring' AND $candidate <> '' AND s.id IS NULL ORDER BY c.created_at DESC, c.id");
+    }
+
+    public function canaries(): array
+    {
+        $title = $this->store->jsonText('c.data', 'title');
+
+        return $this->store->rows("SELECT c.id, c.strategy, c.status, $title AS title, a.name AS asset_name FROM changes c
+            LEFT JOIN assets a ON a.id = c.asset_id LEFT JOIN rollout_schedules s ON s.id = c.id
+            WHERE ".self::CANARY_READY.' ORDER BY c.created_at DESC, c.id');
+    }
+
+    public function history(): array
+    {
+        $title = $this->store->jsonText('c.data', 'title');
+        $canary = $this->store->jsonText('s.data', 'canary');
+        $canaryTitle = $this->store->jsonText('prerequisite.data', 'title');
+
+        return $this->store->rows("SELECT s.*, $title AS title, $canaryTitle AS canary_title, prerequisite.status AS canary_status,
+                prerequisite_schedule.status AS canary_schedule_status
+            FROM rollout_schedules s LEFT JOIN changes c ON c.id = s.id LEFT JOIN changes prerequisite ON prerequisite.id = $canary
+            LEFT JOIN rollout_schedules prerequisite_schedule ON prerequisite_schedule.id = prerequisite.id
+            ORDER BY CASE WHEN s.status = 'scheduled' THEN 0 ELSE 1 END, s.not_before, s.id");
     }
 
     public function runDue(): array

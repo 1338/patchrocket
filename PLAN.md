@@ -944,6 +944,18 @@ The core MVP and the implemented expansion phases below are complete in code. Im
 - [ ] Add dedicated Helm values and Kustomize image override patch targets. Current infrastructure image remediation targets a traced static Deployment YAML image field.
 - [ ] Expand dependency remediation beyond the implemented Composer and direct npm upgrade paths. Go dependency assessment and standalone executable builds do not provide general Go module remediation.
 
+### Dashboard, onboarding, and IT reporting
+
+- [ ] Add cloud cluster selection and workload identity for Kubernetes onboarding. The current connection wizard supports managed kubeconfig and preconfigured worker contexts, selected or all namespaces, and read-only worker verification.
+- [x] Move the dashboard, sign-in, setup, settings, and evidence pages to Preact with Symfony page data and APIs.
+- [ ] Start live updates with authenticated remediation status events. Reconcile with the API after a reconnect and apply the same authorization to event subscriptions and API requests.
+- [ ] Add a resumable setup wizard under Settings after the first administrator claim. Check database, worker, and integration readiness, then guide the operator through a first source, target, credential, and optional read-only discovery. Start with manual approval and scheduled rollouts off. Offer restored installations an optional readiness checklist, with backup import validation and activation as a separate flow.
+- [ ] Record operational audit events with stable account or service identity, timestamp, action, outcome, target, and request or job correlation. Link to remediation evidence. Commit successful action events with their state changes and mark older events with unknown actors. Exclude secrets and raw request bodies.
+- [ ] Add Settings controls for teams, memberships, and repository or environment ownership. Support distinct prepare, approve, deploy, and audit permissions, plus an unassigned queue. Enforce scope on reads, writes, downloads, reports, and live events.
+- [ ] Add scoped activity and CSV reporting for open risk, approval backlog, time to verified rollout, failures, and rollbacks. Keep actor-level records in the authorized audit view.
+- [ ] Add Settings → Monitoring with scrape enablement, one-time token creation and revocation, and Grafana dashboard downloads. Expose aggregate metrics through a bearer-authenticated Prometheus endpoint with fixed label sets. Start with inventory, active findings, change states, observed runtime verification, scan freshness, and queue health. Ship one versioned dashboard as manual-import JSON and as a provisioning bundle.
+- [ ] Persist worker heartbeats and the first observed runtime verification timestamp. Use durable, retry-safe outcome counters for historical trends. Leave rollout duration unknown when older evidence has no timestamp. Verify scrapes on SQLite and PostgreSQL and test that staging and approval leave the runtime verification count unchanged.
+
 The wider capabilities described in sections 2–12 remain design scope unless explicitly documented as implemented in the operating guide. In particular, scanner/intelligence integrations, additional package ecosystems, and deployment models should not be read as a completed support matrix.
 
 ## 14. Hackathon Demonstration

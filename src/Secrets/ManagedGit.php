@@ -45,9 +45,14 @@ final class ManagedGit
         }
     }
 
+    public static function supportsUrl(string $url): bool
+    {
+        return 1 === preg_match('#^https://[a-zA-Z0-9.-]+(?::[0-9]+)?/(?:[a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+(?:\.git)?$#D', $url);
+    }
+
     public function credentials(string $reference, string $url): array
     {
-        if (!preg_match('#^https://[a-zA-Z0-9.-]+(?::[0-9]+)?/(?:[a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+(?:\.git)?$#D', $url)) {
+        if (!self::supportsUrl($url)) {
             throw new \DomainException('Managed Git sources require an HTTPS repository URL without credentials.');
         }
         $bundle = $this->managers->bundle($reference);

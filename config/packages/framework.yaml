@@ -15,11 +15,20 @@ framework:
         transports:
             jobs:
                 dsn: 'doctrine://default?queue_name=patches&auto_setup=false'
+                options: { redeliver_timeout: !php/const App\Queue\TransportBacklog::REDELIVERY_SECONDS }
+                retry_strategy: { max_retries: 0 }
+            kubernetes_checks:
+                dsn: 'doctrine://default?queue_name=kubernetes_checks&auto_setup=false'
+                options: { redeliver_timeout: !php/const App\Queue\TransportBacklog::REDELIVERY_SECONDS }
                 retry_strategy: { max_retries: 0 }
             failed_jobs: 'doctrine://default?queue_name=failed&auto_setup=false'
         routing:
             'App\Remediation\RunChange': jobs
+            'App\Remediation\RunIndependentVerification': jobs
+            'App\Remediation\RunRegistryCleanup': jobs
+            'App\Remediation\RunVmPackage': jobs
             'App\Settings\RunInventory': jobs
+            'App\Settings\RunKubernetesCheck': kubernetes_checks
     workflows:
         changes:
             type: state_machine

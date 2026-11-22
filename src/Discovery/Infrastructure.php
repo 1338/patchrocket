@@ -15,6 +15,12 @@ final class Infrastructure
 
     public function docker(?string $label, ?string $repository, ?string $context = null): int
     {
+        return $this->dockerInventory($label, $repository, $context)['containers'];
+    }
+
+    /** @return array{host: string, containers: int} */
+    public function dockerInventory(?string $label, ?string $repository, ?string $context = null): array
+    {
         $this->validateRepository($repository);
         $args = [...$this->dockerCommand($context), 'container', 'ls', '-aq', '--no-trunc'];
         if (null !== $label) {
@@ -42,7 +48,7 @@ final class Infrastructure
             ++$count;
         }
 
-        return $count;
+        return ['host' => $host, 'containers' => $count];
     }
 
     public function inspectContainer(string $id, ?string $context = null): array
@@ -113,7 +119,7 @@ final class Infrastructure
         return $this->recordKubernetes($context, $namespace, $repository, $sets, $pods, $replicas, null !== $config);
     }
 
-    public function deliveryResources(string $context, string $namespace, bool $allNamespaces, string $config): array
+    public function deliveryResources(string $context, string $namespace, bool $allNamespaces, ?string $config): array
     {
         $base = [...$this->kubeCommand($config), '--context='.$context, '--request-timeout=10s'];
         if (!$allNamespaces) {
@@ -153,7 +159,7 @@ final class Infrastructure
         return $results;
     }
 
-    public function argoApplications(string $context, string $namespace, string $config): array
+    public function argoApplications(string $context, string $namespace, ?string $config): array
     {
         if (!preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/D', $namespace)) {
             throw new \DomainException('An Argo CD namespace is required.');

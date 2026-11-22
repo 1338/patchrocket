@@ -60,6 +60,17 @@ final class JenkinsBuildStatus
         return self::validAddress($parts) && preg_match('~^(?:/[A-Za-z0-9_-]+)*$~D', $parts['path'] ?? '');
     }
 
+    public static function suggestedServer(string $job): ?string
+    {
+        $boundary = strpos($job, '/job/');
+        if (false === $boundary || !self::validJob($job)) {
+            return null;
+        }
+        $server = substr($job, 0, $boundary);
+
+        return self::serverContainsJob($server, $job) ? $server : null;
+    }
+
     public static function serverContainsJob(string $server, string $job): bool
     {
         $server = rtrim($server, '/');

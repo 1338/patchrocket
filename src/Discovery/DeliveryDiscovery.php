@@ -25,7 +25,8 @@ final class DeliveryDiscovery
     ) {
     }
 
-    public function record(string $source, array $candidates): int
+    /** @param list<string> $unavailableKinds */
+    public function record(string $source, array $candidates, array $unavailableKinds = []): int
     {
         if ('' === $source || strlen($source) > 512 || preg_match('/[\x00-\x1f\x7f]/', $source)) {
             throw new \DomainException('Choose a valid discovery scope.');
@@ -39,12 +40,43 @@ final class DeliveryDiscovery
             }
         }
 
-        $this->store->put('operator_settings', [
-            'id' => 'delivery-source:'.substr(hash('sha256', $source), 0, 48),
-            'data' => Store::json(['source' => $source, 'observed_at' => gmdate(DATE_ATOM), 'candidates' => array_values($observed)]),
-        ]);
+        $id = 'delivery-source:'.substr(hash('sha256', $source), 0, 48);
+        $report = ['source' => $source, 'observed_at' => gmdate(DATE_ATOM), 'candidates' => array_values($observed)];
+        if ($unavailableKinds) {
+            $this->recordPartial($id, $report, $observed, $unavailableKinds);
+        } else {
+            $this->store->put('operator_settings', ['id' => $id, 'data' => Store::json($report)]);
+        }
 
         return count($observed);
+    }
+
+    private function recordPartial(string $id, array $report, array $observed, array $unavailableKinds): void
+    {
+        for ($attempt = 0; $attempt < 3; ++$attempt) {
+            $stored = $this->store->db->fetchOne('SELECT data FROM operator_settings WHERE id = ?', [$id]);
+            $previous = false === $stored ? [] : json_decode($stored, true, flags: JSON_THROW_ON_ERROR);
+            $combined = $observed;
+            foreach ($previous['candidates'] ?? [] as $candidate) {
+                if (in_array($candidate['kind'], $unavailableKinds, true) && !isset($combined[$candidate['id']])) {
+                    $candidate['observed_at'] ??= $previous['observed_at'];
+                    $candidate['retained'] = true;
+                    $combined[$candidate['id']] = $candidate;
+                }
+            }
+            $report['candidates'] = array_values($combined);
+            // Rebuild from the latest report if another discovery completed while merging this one.
+            $written = $this->store->db->executeStatement(
+                'INSERT INTO operator_settings (id, data) VALUES (?, ?)
+                 ON CONFLICT (id) DO UPDATE SET data = excluded.data WHERE operator_settings.data = ?',
+                [$id, Store::json($report), false === $stored ? null : $stored],
+            );
+            if (1 === $written) {
+                return;
+            }
+        }
+
+        throw new \DomainException('This discovery scope was refreshed at the same time. Run discovery again to update its results.');
     }
 
     public function all(): array
@@ -59,8 +91,11 @@ final class DeliveryDiscovery
             $report = $row['data'];
             foreach ($report['candidates'] as $candidate) {
                 $id = $candidate['id'];
-                $candidates[$id] ??= $candidate + ['sources' => [], 'cluster_sources' => [], 'binding' => $bindings[$id] ?? null];
-                $candidates[$id]['sources'][$report['source']] = $report['observed_at'];
+                $candidates[$id] ??= $candidate + ['sources' => [], 'retained_sources' => [], 'cluster_sources' => [], 'binding' => $bindings[$id] ?? null];
+                $candidates[$id]['sources'][$report['source']] = $candidate['observed_at'] ?? $report['observed_at'];
+                if (!empty($candidate['retained'])) {
+                    $candidates[$id]['retained_sources'][] = $report['source'];
+                }
                 if ($candidate['connection_id'] && $candidate['namespace']) {
                     $candidates[$id]['cluster_sources'][$candidate['connection_id']] = $candidate['namespace'];
                 }
@@ -132,6 +167,7 @@ final class DeliveryDiscovery
             foreach ($this->connections->all() as $option) {
                 if ('cluster' === $option['kind'] && ($option['data']['target'] ?? '') === $data['target']
                     && ($option['data']['credential'] ?? '') === ($data['credential'] ?? '')
+                    && Connections::clusterNamespaces($option['data']) === Connections::clusterNamespaces($data)
                     && ($option['data']['argo_namespace'] ?? '') === $namespace) {
                     $cluster = $option;
                     break;
@@ -140,7 +176,8 @@ final class DeliveryDiscovery
             if ($cluster['id'] === $id) {
                 $name = substr($cluster['name'], 0, 55).' / '.$namespace;
                 $clone = array_intersect_key($data, array_flip([
-                    'target', 'namespace', 'repository', 'all_namespaces', 'registries', 'platform', 'host_asset', 'credential',
+                    'target', 'namespace', 'repository', 'all_namespaces', 'namespace_mode', 'namespaces',
+                    'registries', 'platform', 'host_asset', 'credential',
                 ]));
                 $clone['credential'] = ($clone['credential'] ?? '') ?: $reference;
                 $clone['argo_namespace'] = $namespace;
@@ -165,7 +202,7 @@ final class DeliveryDiscovery
         foreach ($this->connections->all() as $connection) {
             $data = $connection['data'];
             if ($kind === $connection['kind'] && $target === $data['target'] && $reference === ($data['credential'] ?? '')
-                && ('vm' === $kind || $namespace === ($data['namespace'] ?: 'default'))) {
+                && ('vm' === $kind || Connections::coversNamespace($data, $namespace))) {
                 return $connection['id'];
             }
         }

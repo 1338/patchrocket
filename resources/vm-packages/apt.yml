@@ -1,0 +1,38 @@
+---
+- name: Manage an approved APT package on one VM
+  hosts: patchrocket_vm
+  gather_facts: false
+  tasks:
+    - name: Run the guarded package operation
+      become: "{{ operation == 'apply' and ansible_user != 'root' }}"
+      become_method: sudo
+      ansible.builtin.command:
+        argv:
+          - /bin/sh
+          - -s
+          - --
+          - "{{ operation }}"
+          - "{{ package }}"
+          - "{{ machine }}"
+          - "{{ architecture }}"
+          - "{{ previous_version }}"
+          - "{{ approved_version }}"
+        stdin: "{{ lookup('ansible.builtin.file', playbook_dir + '/apt.sh') }}"
+        expand_argument_vars: false
+      environment:
+        LC_ALL: C
+        DEBIAN_FRONTEND: noninteractive
+        NEEDRESTART_MODE: l
+      register: package_operation
+      changed_when: operation == 'apply' and package_operation.rc == 0
+      failed_when: false
+      no_log: true
+
+    - name: Save structured package evidence for PatchRocket
+      delegate_to: localhost
+      become: false
+      ansible.builtin.copy:
+        dest: "{{ result_file }}"
+        mode: "0600"
+        content: "{{ {'rc': package_operation.rc, 'output': package_operation.stdout} | to_json }}"
+      no_log: true

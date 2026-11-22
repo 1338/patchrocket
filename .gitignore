@@ -13,3 +13,6 @@
 .DS_Store
 *.pem
 *.key
+
+/node_modules/
+/public/ui/

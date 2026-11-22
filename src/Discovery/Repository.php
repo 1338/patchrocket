@@ -121,8 +121,8 @@ final class Repository
         $workspace = $root.'/work';
         (new Filesystem())->mkdir($workspace, 0700);
         $archive = $root.'/source.tar';
-        $this->git($path, ['archive', '--format=tar', '--output='.$archive, $object]);
-        (new Process(['tar', '--extract', '--file', $archive, '--no-same-owner', '--no-same-permissions', '-C', $workspace], timeout: 30))->mustRun();
+        $this->git($path, ['-c', 'tar.umask=0022', 'archive', '--format=tar', '--output='.$archive, $object]);
+        (new Process(['tar', '--extract', '--file', $archive, '--no-same-owner', '--same-permissions', '-C', $workspace], timeout: 30))->mustRun();
         unlink($archive);
 
         return $workspace;

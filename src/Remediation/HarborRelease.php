@@ -15,15 +15,23 @@ final class HarborRelease
 
     public function resolve(string $image, string $revision, string $platform, string $scratch): ?array
     {
-        if (!preg_match('~^[a-z0-9][a-z0-9.:-]*/[a-z0-9][a-z0-9._/-]+$~D', $image)
-            || !preg_match('/^[a-f0-9]{40}$/D', $revision) || !preg_match('~^linux/[a-z0-9]+(?:/v[0-9]+)?$~D', $platform)) {
+        $host = self::repositoryHost($image);
+        if (null === $host || !preg_match('/^[a-f0-9]{40}$/D', $revision) || !preg_match('~^linux/[a-z0-9]+(?:/v[0-9]+)?$~D', $platform)) {
             throw new \DomainException('The release requires an observed registry repository, Git commit and platform.');
         }
-        $host = explode('/', $image, 2)[0];
         if (!$this->settings->registryReference($host)) {
             throw new \DomainException('Configure a managed pull credential for '.$host.' in Delivery integrations.');
         }
         return $this->artifact($image, $image.':'.$revision, $platform, $scratch, $revision);
+    }
+
+    public static function repositoryHost(string $image): ?string
+    {
+        if (!preg_match('~^([a-z0-9][a-z0-9.:-]*)/[a-z0-9][a-z0-9._/-]+$~D', $image, $parts)) {
+            return null;
+        }
+
+        return OperatorSettings::normalizeRegistryHost($parts[1]);
     }
 
     public function upstream(string $reference, string $platform, string $scratch): array

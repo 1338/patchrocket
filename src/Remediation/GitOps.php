@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Remediation;
 
 use App\Audit\Store;
+use Symfony\Component\Process\Exception\ExceptionInterface;
 use Symfony\Component\Process\Process;
 use Symfony\Component\Yaml\Yaml;
 
@@ -64,9 +65,12 @@ final class GitOps
             throw new \DomainException('Choose a valid Kubernetes Deployment name.');
         }
         $base = ['kubectl', ...($config ? ['--kubeconfig='.$config, '--cache-dir='.dirname($config).'/cache'] : []), '--context='.$context, '--namespace='.$namespace, '--request-timeout=20s', 'get'];
-        $state = $this->get([...$base, 'deployment', $deployment, '-o', 'json']);
-        $replicas = $this->get([...$base, 'replicasets', '-o', 'json'])['items'];
-        $pods = $this->get([...$base, 'pods', '-o', 'json'])['items'];
+        $state = $this->get([...$base, 'deployment', $deployment, '-o', 'json'], 'the Deployment', 'metadata');
+        if (!is_string($state['metadata']['uid'] ?? null) || !is_int($state['metadata']['generation'] ?? null)) {
+            throw new \DomainException('Kubernetes returned incomplete Deployment metadata.');
+        }
+        $replicas = $this->get([...$base, 'replicasets', '-o', 'json'], 'ReplicaSets', 'items')['items'];
+        $pods = $this->get([...$base, 'pods', '-o', 'json'], 'pods', 'items')['items'];
         $owners = [];
         foreach ($replicas as $replica) {
             if ($this->owner($replica) === $state['metadata']['uid']) {
@@ -92,15 +96,21 @@ final class GitOps
             }
         }
         $declared = array_column($state['spec']['template']['spec']['containers'] ?? [], 'image', 'name');
-        $passed = $expected > 0 && in_array($declared[$container] ?? null, $declaredImages, true)
-            && ($state['status']['observedGeneration'] ?? 0) === $state['metadata']['generation']
-            && ($state['status']['availableReplicas'] ?? $ready) === $expected
-            && $expected === $ready && 0 === $unexpected;
+        $checks = [
+            'The Deployment requests no replicas.' => $expected > 0,
+            'The Deployment template has a different container image.' => in_array($declared[$container] ?? null, $declaredImages, true),
+            'Kubernetes has yet to observe the current Deployment generation.' => ($state['status']['observedGeneration'] ?? 0) === $state['metadata']['generation'],
+            'The available replica count differs from the requested count.' => ($state['status']['availableReplicas'] ?? $ready) === $expected,
+            'The ready replica count at the verified digest differs from the requested count.' => $expected === $ready,
+            'Some active pods are terminating or have no ready container at the verified digest.' => 0 === $unexpected,
+        ];
+        $issues = array_keys(array_filter($checks, static fn (bool $passed): bool => !$passed));
+        $passed = [] === $issues;
 
-        return compact('passed', 'expected', 'ready', 'unexpected');
+        return compact('passed', 'expected', 'ready', 'unexpected', 'issues');
     }
 
-    public function observeIac(Change $change, string $config): bool
+    public function observeIac(Change $change, string $config, ?string $connectionId = null, ?string $connectionName = null): bool
     {
         if ('iac-image' !== $change->strategy || 'approved' !== $change->getStatus() || empty($change->data['image_verification']['image'])) {
             throw new \DomainException('Approve the infrastructure update before verifying the deployed digest.');
@@ -110,9 +120,10 @@ final class GitOps
         $evidence = $this->rolloutEvidence($plan['context'], $plan['namespace'], $plan['deployment'], $plan['container'],
             [$plan['fixed'], $image], [$image], $config);
 
-        return $this->store->db->transactional(function () use ($change, $evidence, $image): bool {
-            $this->store->record($change->id, 'rollout_check', [
-                'label' => 'IaC rollout digest', 'passed' => $evidence['passed'], 'round' => 0,
+        return $this->store->db->transactional(function () use ($change, $evidence, $image, $connectionId, $connectionName): bool {
+            $this->store->record($change->id, 'rollout_check', $evidence + [
+                'label' => 'IaC rollout digest', 'round' => 0, 'connection' => $connectionId, 'image' => $image,
+                'connection_name' => $connectionName,
                 'log' => $evidence['ready'].'/'.$evidence['expected'].' ready at '.$image,
             ]);
             if (!$evidence['passed']) {
@@ -135,8 +146,19 @@ final class GitOps
         return null;
     }
 
-    private function get(array $args): array
+    private function get(array $args, string $resource, string $requiredField): array
     {
-        return json_decode((new Process($args, timeout: 25))->mustRun()->getOutput(), true, flags: JSON_THROW_ON_ERROR);
+        try {
+            $data = json_decode((new Process($args, timeout: 25))->mustRun()->getOutput(), true, flags: JSON_THROW_ON_ERROR);
+        } catch (ExceptionInterface) {
+            throw new \DomainException('Could not read '.$resource.' from Kubernetes. Check the connection and read permissions.');
+        } catch (\JsonException) {
+            throw new \DomainException('Could not decode the Kubernetes response for '.$resource.'.');
+        }
+        if (!is_array($data[$requiredField] ?? null)) {
+            throw new \DomainException('Kubernetes returned incomplete data for '.$resource.'.');
+        }
+
+        return $data;
     }
 }

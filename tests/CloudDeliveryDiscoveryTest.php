@@ -52,12 +52,13 @@ final class CloudDeliveryDiscoveryTest extends TestCase
             'client_secret' => 'synthetic',
         ], static function (CloudDeliveryDiscovery $discovery) use ($scope): void {
             $warnings = [];
-            $candidates = $discovery->discover('azure', $scope, '', 'fixture:cloud', static function (string $message) use (&$warnings): void {
-                $warnings[] = $message;
+            $candidates = $discovery->discover('azure', $scope, '', 'fixture:cloud', static function (string $message, array $kinds) use (&$warnings): void {
+                $warnings[] = [$message, $kinds];
             });
             self::assertSame(['west.azurecr.io', 'east.azurecr.io', 'private.k8s.example'], array_column($candidates, 'endpoint'));
             self::assertSame('cluster', $candidates[2]['kind']);
-            self::assertStringContainsString('virtual machines', $warnings[0]);
+            self::assertStringContainsString('virtual machines', $warnings[0][0]);
+            self::assertSame(['vm', 'harbor', 'jenkins', 'argocd'], $warnings[0][1]);
         });
     }
 

@@ -5,6 +5,8 @@ namespace App\Remediation;
 
 use App\Asset\Inventory;
 use App\Audit\Store;
+use App\Discovery\Repository;
+use App\Secrets\ManagedGit;
 use App\Secrets\SecretManagers;
 use App\Settings\Connections;
 use Symfony\Component\Process\Exception\ExceptionInterface;
@@ -41,8 +43,15 @@ final class DashboardPreparation
             if ($iac = $this->changes->infrastructureImageSource($asset)) {
                 return [
                     'strategy' => 'iac-image', 'source' => $iac['source'], 'repository' => $iac['asset'],
-                    'connection' => $this->repositoryConnection($iac['url'], $iac['asset']['data']['path'], true),
+                    'url' => $iac['url'],
+                    'connection' => $this->repositoryConnection($iac['url'], $iac['asset']['data']['path'] ?? '', true),
                 ];
+            }
+            if ('registry' === ($asset['data']['origin'] ?? null) && empty($asset['data']['build_sources']) && !$this->inventory->imageRuntime($asset)['observed']) {
+                return ['error' => 'This finding comes from a registry scan. PatchRocket has no recorded runtime observation or Dockerfile source for this exact image digest.'];
+            }
+            if (empty($asset['data']['build_sources'])) {
+                return ['error' => 'PatchRocket could not trace this image to a supported infrastructure YAML image field or a Dockerfile. A YAML update can use an existing fixed image by digest.'];
             }
             return ['error' => $error->getMessage()];
         }
@@ -52,8 +61,33 @@ final class DashboardPreparation
         $defaults = $overlay ? $this->verifiedInputs($finding['data']['fixed'], $asset['data']['platform']) : [];
         return [
             'strategy' => 'docker-base', 'source' => $source, 'repository' => $repository,
-            'url' => $url, 'connection' => $this->repositoryConnection($url, $repository['data']['path']),
+            'url' => $url, 'connection' => $this->repositoryConnection($url, $repository['data']['path'] ?? ''),
             'overlay' => $overlay, 'fixed' => $defaults['base_image'] ?? '',
+        ];
+    }
+
+    public function repositorySetup(mixed $findingId): ?array
+    {
+        if (!is_string($findingId) || !preg_match('/^[a-f0-9]{64}$/D', $findingId)) {
+            return null;
+        }
+        $finding = $this->store->row('SELECT * FROM findings WHERE id = ? AND active = 1', [$findingId]);
+        $asset = $finding ? $this->inventory->get($finding['asset_id']) : null;
+        $form = $asset ? $this->form($finding, $asset) : null;
+        $repository = $form['repository'] ?? null;
+        if (!$repository) {
+            return null;
+        }
+        $url = $form['url'];
+        $path = $repository['data']['path'] ?? '';
+
+        return [
+            'connection' => $form['connection']['id'] ?? null,
+            'name' => mb_strcut($repository['name'], 0, 120, 'UTF-8'),
+            'target' => ManagedGit::supportsUrl($url) ? $url : (str_starts_with($path, '/') ? $path : ''),
+            'canonical_url' => Repository::safeUrl($url),
+            'role' => 'iac-image' === $form['strategy'] ? 'infrastructure' : 'application',
+            'infra_context' => $form['source']['context'] ?? '',
         ];
     }
 
@@ -75,11 +109,11 @@ final class DashboardPreparation
             }
             $branch = trim($input['base'] ?? '');
             if (!preg_match('~^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,100}$~D', $branch)) {
-                throw new \DomainException('Enter the source branch to patch.');
+                throw new RemediationFieldError('base', 'Enter a valid source branch, such as main or release/stable.');
             }
             $reference = trim($input['credential'] ?? '') ?: ($form['connection']['data']['credential'] ?? '');
             if ('' !== $reference && !SecretManagers::validReference($reference)) {
-                throw new \DomainException('Enter a managed Git credential reference in manager:secret format.');
+                throw new RemediationFieldError('credential', 'Enter a managed Git credential reference in manager:secret format.');
             }
 
             return $this->changes->queue($id, $strategy, $form['repository']['id'], [

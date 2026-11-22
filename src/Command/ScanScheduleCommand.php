@@ -5,6 +5,7 @@ namespace App\Command;
 
 use App\Audit\Store;
 use App\Intelligence\ScanSchedules;
+use App\Queue\SchedulerActivity;
 use App\Settings\Connections;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -16,8 +17,11 @@ use Symfony\Component\Console\Output\OutputInterface;
 #[AsCommand('patchrocket:scan-schedule', 'Manage recurring scans for registered assets')]
 final class ScanScheduleCommand extends Command
 {
-    public function __construct(private readonly ScanSchedules $schedules, private readonly Connections $connections)
-    {
+    public function __construct(
+        private readonly ScanSchedules $schedules,
+        private readonly Connections $connections,
+        private readonly SchedulerActivity $activity,
+    ) {
         parent::__construct();
     }
 
@@ -36,11 +40,15 @@ final class ScanScheduleCommand extends Command
             $output->writeln(Store::json($this->schedules->all()), OutputInterface::OUTPUT_RAW);
         } elseif ('run-due' === $action) {
             $limit = $this->number($input->getOption('limit'));
-            $results = $this->schedules->runDue($limit);
-            $remaining = $limit - count($results);
-            if ($remaining > 0) {
-                $results += $this->connections->enqueueDue($remaining);
-            }
+            $results = $this->activity->run(SchedulerActivity::SCANS, function () use ($limit): array {
+                $results = $this->schedules->runDue($limit);
+                $remaining = $limit - count($results);
+                if ($remaining > 0) {
+                    $results += $this->connections->enqueueDue($remaining);
+                }
+
+                return $results;
+            }, ['passed', 'failed', 'queued']);
             $output->writeln(Store::json($results), OutputInterface::OUTPUT_RAW);
 
             return in_array('failed', $results, true) ? Command::FAILURE : Command::SUCCESS;

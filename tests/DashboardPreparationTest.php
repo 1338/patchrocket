@@ -82,14 +82,28 @@ PIPELINE);
             $changes = new Changes($store, $inventory, $repositories, new ComposerUpgrade($sandbox, new Scanner($inventory, $store, 'unused')),
                 new DockerBaseUpgrade(), new NpmUpgrade($sandbox), $bus, new ApprovalPolicy($store, $inventory),
                 new ManagedGit($managers, $root), new Workflow(new Definition(['queued'], [])));
-            $form = new DashboardPreparation($store, $inventory, $changes, new Connections($store, $bus));
+            $connections = new Connections($store, $bus);
+            $form = new DashboardPreparation($store, $inventory, $changes, $connections);
             self::assertTrue($form->form($findings[0], $inventory->get($asset))['overlay']);
             $inputs = [
                 'base' => 'main',
                 'fixed' => 'docker.io/nginx/nginx-unprivileged:1.30.7-alpine@sha256:'.str_repeat('b', 64),
                 'node_image' => 'sha256:'.str_repeat('c', 64),
             ];
-            $first = $form->start($findings[0]['id'], $inputs);
+            $useSavedCredential = $inputs + ['credential' => ''];
+            $connection = $connections->save('repository', [
+                'name' => 'Fixture source', 'target' => $url, 'credential' => 'unavailable:source',
+            ]);
+            try {
+                $form->start($findings[0]['id'], $useSavedCredential);
+                self::fail('A blank override should use the saved managed reference.');
+            } catch (\DomainException $error) {
+                self::assertSame('The referenced secrets manager is unavailable.', $error->getMessage());
+            }
+            $connections->save('repository', [
+                'id' => $connection, 'name' => 'Fixture source', 'target' => $root, 'canonical_url' => $url,
+            ]);
+            $first = $form->start($findings[0]['id'], $useSavedCredential);
             self::assertSame($first, $form->start($findings[1]['id'], $inputs));
             self::assertCount(1, $bus->messages);
             $change = $changes->get($first);
@@ -98,11 +112,51 @@ PIPELINE);
             self::assertSame($revision, $change->data['revision']);
             self::assertSame(['CVE-fixture-1', 'CVE-fixture-2'], $change->data['plan']['advisories']);
 
-            $store->db->update('changes', ['status' => 'failed'], ['id' => $first]);
-            $second = $form->start($findings[0]['id'], $inputs);
+            $change->data += ['patch' => 'old output', 'patch_sha256' => str_repeat('d', 64), 'worker_started_at' => time()];
+            $store->db->update('changes', ['status' => 'failed', 'data' => Store::json($change->data)], ['id' => $first]);
+            $failed = $changes->get($first);
+            $second = $changes->retryPreparation($failed);
             self::assertNotSame($first, $second);
+            self::assertSame($second, $changes->retryPreparation($failed));
             self::assertSame($second, $form->start($findings[0]['id'], $inputs));
             self::assertCount(2, $bus->messages);
+            $retry = $changes->get($second);
+            self::assertSame($first, $retry->data['retry_of']);
+            self::assertSame($change->data['plan'], $retry->data['plan']);
+            self::assertSame($revision, $retry->data['revision']);
+            self::assertArrayNotHasKey('patch', $retry->data);
+            self::assertArrayNotHasKey('patch_sha256', $retry->data);
+            self::assertArrayNotHasKey('worker_started_at', $retry->data);
+            self::assertSame('old output', $changes->get($first)->data['patch']);
+
+            $legacyRetry = array_diff_key($retry->data, ['retry_of' => true]);
+            $store->db->update('changes', ['status' => 'failed', 'data' => Store::json($legacyRetry)], ['id' => $second]);
+            self::assertSame($second, $changes->retryPreparation($failed));
+            self::assertCount(2, $bus->messages);
+            $redo = $inputs + ['nginx_overlay' => true, 'previous_revision' => $revision];
+            try {
+                $changes->queue($findings[0]['id'], 'docker-base', $source, $redo, reuse: true);
+                self::fail('A fresh preparation requires a changed base revision.');
+            } catch (\DomainException $error) {
+                self::assertStringContainsString('still at the verified revision', $error->getMessage());
+            }
+            (new Process(['git', '-C', $root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'advance branch']))->mustRun();
+            $freshRevision = $repositories->revision($root);
+            (new Process(['git', '-C', $root, 'update-ref', 'refs/remotes/origin/main', $freshRevision]))->mustRun();
+            $inventory->asset('image', $digest, $image, ['build_sources' => []]);
+            $verified = new \App\Remediation\Change($first, 'docker-base', 'approved', $change->data + [
+                'image_verification' => ['image' => 'fixture'],
+            ]);
+            $fresh = $changes->queue($findings[0]['id'], 'docker-base', $source, $redo, reuse: true, previous: $verified);
+            self::assertSame($fresh, $changes->queue($findings[0]['id'], 'docker-base', $source, $redo, reuse: true, previous: $verified));
+            self::assertSame($freshRevision, $changes->get($fresh)->data['revision']);
+            self::assertSame('queued', $changes->get($fresh)->getStatus());
+            self::assertArrayNotHasKey('patch', $changes->get($fresh)->data);
+            self::assertCount(3, $bus->messages);
+            $store->db->update('findings', ['active' => 0], ['id' => $findings[0]['id']]);
+            $this->expectExceptionMessage('The finding or its available fix changed.');
+            $changes->retryPreparation($changes->get($second));
         });
     }
 }

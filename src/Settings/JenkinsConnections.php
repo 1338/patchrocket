@@ -20,9 +20,9 @@ final class JenkinsConnections
 
     public function save(string $server, string $reference): void
     {
-        $server = rtrim(trim($server), '/');
+        $server = self::normalizeServer($server);
         $reference = trim($reference);
-        if (strlen($server) > 512 || !JenkinsBuildStatus::validServer($server)) {
+        if (null === $server) {
             throw new \DomainException('Enter the Jenkins base URL, including its context path if it has one.');
         }
         if (!SecretManagers::validReference($reference)) {
@@ -33,6 +33,13 @@ final class JenkinsConnections
         ]);
     }
 
+    public static function normalizeServer(string $server): ?string
+    {
+        $server = rtrim(trim($server), '/');
+
+        return strlen($server) <= 512 && JenkinsBuildStatus::validServer($server) ? $server : null;
+    }
+
     public function remove(string $server): void
     {
         $this->store->db->delete('operator_settings', ['id' => $this->id(rtrim(trim($server), '/'))]);
@@ -40,10 +47,15 @@ final class JenkinsConnections
 
     public function referenceFor(string $job): ?string
     {
+        return $this->connectionFor($job)['reference'] ?? null;
+    }
+
+    public function connectionFor(string $job): ?array
+    {
         $matches = array_filter($this->all(), static fn (array $entry): bool => JenkinsBuildStatus::serverContainsJob($entry['server'], $job));
         usort($matches, static fn (array $a, array $b): int => strlen($b['server']) <=> strlen($a['server']));
 
-        return $matches[0]['reference'] ?? null;
+        return $matches[0] ?? null;
     }
 
     private function id(string $server): string

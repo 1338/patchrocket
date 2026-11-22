@@ -1,0 +1,18 @@
+{
+  "name": "patchrocket-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev:fixture": "node frontend/tests/preview.js",
+    "test": "sh bin/check browser",
+    "watch": "vite build --watch"
+  },
+  "dependencies": {
+    "preact": "11.2.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "vite": "8.3.8"
+  }
+}

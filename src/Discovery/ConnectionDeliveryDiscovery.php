@@ -34,17 +34,22 @@ final class ConnectionDeliveryDiscovery
                 array_column(array_filter($records, static fn (array $record): bool => 'warning' === ($record[0] ?? null)), 1),
                 ['Systemd metadata was unavailable', 'Docker metadata was unavailable'],
             ));
-            $scope = 'SSH · '.$host.(!empty($data['port']) ? ':'.$data['port'] : '');
         } else {
-            $namespace = ($data['namespace'] ?? '') ?: 'default';
-            $all = !empty($data['all_namespaces']);
-            $resources = $this->credentials->kubernetes($data['credential'], $target, fn (string $config): array =>
-                $this->kube->deliveryResources($target, $namespace, $all, $config));
+            $namespaces = Connections::clusterNamespaces($data);
+            $multiple = count($namespaces ?? []) > 1;
+            $workerConfig = 'worker' === ($data['credential_mode'] ?? null);
+            [$resources, $warnings] = $workerConfig
+                ? $this->kubernetesResources($target, $namespaces, null)
+                : $this->credentials->kubernetes($data['credential'], $target, fn (string $config): array =>
+                    $this->kubernetesResources($target, $namespaces, $config));
             $argoNamespace = $data['argo_namespace'] ?? '';
             if ('' !== $argoNamespace) {
                 try {
-                    $apps = $this->credentials->kubernetes(Connections::argoCredential($data), $target, fn (string $config): array =>
-                        $this->kube->argoApplications($target, $argoNamespace, $config));
+                    $reference = Connections::argoCredential($data);
+                    $apps = $workerConfig && '' === $reference
+                        ? $this->kube->argoApplications($target, $argoNamespace, null)
+                        : $this->credentials->kubernetes($reference, $target, fn (string $config): array =>
+                            $this->kube->argoApplications($target, $argoNamespace, $config));
                     $resources['applications.argoproj.io'] = [...($resources['applications.argoproj.io'] ?? []), ...$apps];
                 } catch (\DomainException) {
                     $warnings[] = 'Could not read the configured Argo CD Applications namespace.';
@@ -54,16 +59,54 @@ final class ConnectionDeliveryDiscovery
                 throw new \DomainException('The Kubernetes identity could not list Services, Ingresses, Deployments, or Argo CD Applications in this scope.');
             }
             $missing = array_keys(array_filter($resources, static fn (?array $records): bool => null === $records));
-            if ($missing) {
+            if ($missing && !$multiple) {
                 $warnings[] = 'Unavailable resource lists: '.implode(', ', $missing).'.';
             }
             $candidates = self::fromKubernetes($resources, $target, $connection['id']);
-            $scope = 'Kubernetes · '.$target.' / '.($all ? 'all namespaces' : $namespace);
         }
 
-        $count = $this->discovery->record($scope, $candidates);
+        $count = $this->discovery->record(self::scope($connection), $candidates);
 
         return sprintf('%d discovery candidate(s).', $count).($warnings ? ' '.implode(' ', $warnings) : '');
+    }
+
+    public static function scope(array $connection): string
+    {
+        $data = $connection['data'];
+        $target = $data['target'];
+        if ('vm' === $connection['kind']) {
+            $host = substr($target, strpos($target, '@') + 1);
+
+            return 'SSH · '.$host.(!empty($data['port']) ? ':'.$data['port'] : '');
+        }
+        $namespaces = Connections::clusterNamespaces($data);
+        $scope = count($namespaces ?? []) > 1 ? 'selected namespaces · '.$connection['id'] : ($namespaces[0] ?? 'all namespaces');
+
+        return 'Kubernetes · '.$target.' / '.$scope;
+    }
+
+    /** @param list<string>|null $namespaces */
+    private function kubernetesResources(string $target, ?array $namespaces, ?string $config): array
+    {
+        if (null === $namespaces || 1 === count($namespaces)) {
+            return [$this->kube->deliveryResources($target, $namespaces[0] ?? '', null === $namespaces, $config), []];
+        }
+        $resources = $warnings = [];
+        foreach ($namespaces as $namespace) {
+            $unavailable = [];
+            foreach ($this->kube->deliveryResources($target, $namespace, false, $config) as $resource => $records) {
+                if (null === $records) {
+                    $unavailable[] = $resource;
+                    continue;
+                }
+                $resources[$resource] = [...($resources[$resource] ?? []), ...$records];
+            }
+            if ($unavailable) {
+                $warnings[] = 'Unavailable resource lists in '.$namespace.': '.implode(', ', $unavailable).'.';
+            }
+        }
+
+        return [$resources, $warnings];
     }
 
     public static function fromHost(string $host, array $records): array

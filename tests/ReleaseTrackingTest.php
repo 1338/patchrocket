@@ -6,6 +6,7 @@ use App\Audit\Store;
 use App\Discovery\Infrastructure;
 use App\Discovery\Repository;
 use App\Intelligence\Scanner;
+use App\Queue\SchedulerActivity;
 use App\Remediation\ApprovalPolicy;
 use App\Remediation\BitbucketPullRequests;
 use App\Remediation\Changes;
@@ -215,7 +216,8 @@ SH,
                 }
                 $tracking = new ReleaseTracking($store, $connections, $managed, new BitbucketPullRequests($http),
                     $jenkins, new HarborRelease($scanner, $operator), $scanner, $repository,
-                    new ConnectionCredentials($managers, $repository), new Infrastructure($inventory, $store), new GitOps($changes, $store), $jenkinsConnections);
+                    new ConnectionCredentials($managers, $repository), new Infrastructure($inventory, $store), new GitOps($changes, $store),
+                    $jenkinsConnections, new SchedulerActivity($store));
                 $connections->save('repository', ['target' => $infraUrl, 'name' => 'Infra', 'role' => 'infrastructure', 'credential' => 'fixture:infra-git']);
                 $connections->save('cluster', ['target' => 'cluster', 'name' => 'Cluster', 'argo_namespace' => 'argocd', 'credential' => 'fixture:kube']);
                 $conn = array_column($connections->all(), 'id', 'kind');
@@ -230,11 +232,24 @@ SH,
                         'finding' => ['package' => 'nginx', 'type' => 'alpine'],
                     ])]);
                 $store->record($id, 'export', ['url' => 'https://bitbucket.org/team/frontend/pull-requests/1']);
-                $tracking->save($id, ['bitbucket_credential' => 'fixture:bitbucket', 'jenkins_job' => $jenkinsJob,
+                $settings = ['bitbucket_credential' => 'fixture:bitbucket', 'jenkins_job' => $jenkinsJob,
                     'infra_connection' => $conn['repository'], 'infra_branch' => 'main',
                     'infra_file' => 'app.yaml', 'cluster_connection' => $conn['cluster'], 'application' => 'module',
-                    'namespace' => 'apps', 'deployment' => 'module', 'container' => 'module']);
-                self::assertSame('Waiting for Bitbucket to record the merge.', $tracking->check($id));
+                    'namespace' => 'apps', 'deployment' => 'module', 'container' => 'module'];
+                self::assertTrue($tracking->save($id, $settings));
+                $summary = $tracking->pollSummary(time());
+                self::assertNull($summary['latest']);
+                self::assertSame(1, $summary['due_count']);
+                self::assertSame((int) $tracking->get($id)['next_at'], $summary['oldest_due']);
+                self::assertSame([$id => 'Waiting for Bitbucket to record the merge.'], $tracking->due());
+                $summary = $tracking->pollSummary(time());
+                self::assertSame('completed', $summary['latest']['status']);
+                self::assertGreaterThanOrEqual($summary['latest']['started_at'], $summary['latest']['finished_at']);
+                self::assertSame(0, $summary['due_count']);
+                self::assertNull($summary['oldest_due']);
+                $waiting = $tracking->get($id);
+                self::assertFalse($tracking->save($id, $settings));
+                self::assertSame($waiting, $tracking->get($id));
                 $merged = true;
                 if ('unrelated' === $pin) {
                     self::assertSame('Waiting for Jenkins to report a build of the merge commit.', $tracking->check($id));
@@ -243,18 +258,33 @@ SH,
 
                     return;
                 }
-                self::assertSame('Waiting for every replica to become ready on the Harbor digest.', $tracking->check($id));
+                self::assertSame('Waiting for Kubernetes rollout verification.', $tracking->check($id));
+                $waitingResult = $tracking->get($id)['data']['result'];
+                self::assertSame('argocd', $waitingResult['argo_application_namespace']);
+                $rollout = $waitingResult['checks']['Kubernetes rollout'];
+                self::assertFalse($rollout['passed']);
+                self::assertSame(0, $rollout['ready']);
+                self::assertSame(1, $rollout['expected']);
+                self::assertContains('The ready replica count at the verified digest differs from the requested count.', $rollout['issues']);
                 $pod['status']['containerStatuses'][0]['imageID'] = $image.'@'.$digest;
                 $fs->dumpFile($root.'/pods.json', Store::json(['items' => [$pod]]));
                 self::assertSame('Verified the release running in every ready replica.', $tracking->check($id));
                 $result = $tracking->get($id);
                 self::assertSame(0, $result['next_at']);
+                $rollout = $result['data']['result']['checks']['Kubernetes rollout'];
+                self::assertTrue($rollout['passed']);
+                self::assertSame('1 of 1 replicas ready on the Harbor digest', $rollout['detail']);
+                self::assertSame([], $rollout['issues']);
                 self::assertSame('#8 succeeded', $result['data']['result']['checks']['Jenkins build']['detail']);
                 if ('descendant' === $pin) {
                     self::assertSame($commit.' descends from the merge commit', $result['data']['result']['checks']['Pinned source commit']['detail']);
                 }
                 self::assertSame($image.'@'.$digest, $result['data']['result']['artifact']['image']);
                 self::assertSame("scan\n", file_get_contents($root.'/scans'));
+                self::assertFalse($tracking->save($id, array_replace($settings, [
+                    'jenkins_job' => $jenkinsJob.'/', 'infra_branch' => ' main ',
+                ])));
+                self::assertSame($result, $tracking->get($id));
             } finally {
                 if (null === $envPath) {
                     unset($_ENV['PATH']);
@@ -270,7 +300,7 @@ SH,
     public function testBitbucketRejectsACommitThatDoesNotMatchTheAbbreviation(): void
     {
         $bitbucket = new BitbucketPullRequests(new MockHttpClient(new JsonMockResponse(['hash' => str_repeat('b', 40)])));
-        $this->expectExceptionMessage('Bitbucket could not confirm the full merge commit for the abbreviated hash.');
-        $bitbucket->mergeRevision('team/frontend', str_repeat('a', 12), 'fixture-token');
+        $this->expectExceptionMessage('Bitbucket could not confirm the full commit ID for the abbreviated hash.');
+        $bitbucket->resolveRevision('team/frontend', str_repeat('a', 12), 'fixture-token');
     }
 }

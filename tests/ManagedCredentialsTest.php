@@ -186,10 +186,14 @@ SH);
     public function testEksUsesManagedAwsCredentialsAndStoresOnlyATemporaryKubeconfig(): void
     {
         $this->managers->save('fixture', 'vault', 'kv');
-        $this->fixture([
+        $bundle = [
             'region' => 'us-east-1', 'cluster_name' => 'fixture', 'access_key_id' => 'fixture-id',
             'secret_access_key' => 'fixture-secret', 'server' => 'https://eks.example', 'ca_data' => 'Zml4dHVyZQ==',
-        ]);
+        ];
+        $this->fixture(['access_key_id' => 'offline-fixture-id'] + $bundle);
+        $this->credentials->checkKubernetesReference('fixture:eks', null);
+
+        $this->fixture($bundle);
         $path = $this->credentials->kubernetes('fixture:eks', 'target', static function (string $path): string {
             $data = json_decode(file_get_contents($path), true, flags: JSON_THROW_ON_ERROR);
             self::assertSame('fixture-token', $data['users'][0]['user']['token']);

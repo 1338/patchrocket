@@ -1,0 +1,403 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+
+usage() {
+    cat <<'EOF'
+Usage
+  bin/check [all | php] [--worker]
+  bin/check phpunit [--worker] [PHPUnit options or test paths]
+  bin/check browser [--postgres | --sqlite] [--replay | --replay-test ID] [Playwright options]
+  bin/check browser [--postgres | --sqlite] --failure-history [--search TEXT] [--page N]
+
+  all        Run the PHP and browser checks.
+  php        Validate Composer, run PHPUnit and PHPStan, and lint the Symfony container.
+  phpunit    Run PHPUnit with the checkout's test configuration.
+             With no arguments, check prerequisites for the default suite.
+  browser    Build the dashboard and run Playwright.
+  --postgres  Run browser tests with disposable PostgreSQL fixtures.
+  --sqlite    Use SQLite fixtures even when the replay record specifies PostgreSQL.
+  --replay    Save browser traces and fixture logs in a fresh results directory.
+  --replay-test ID
+              Replay one test using the ID printed in its failure report.
+  --failure-history
+              Show recent saved browser failures and their replay commands.
+              Search saved titles, test IDs, or run names with --search TEXT.
+              Browse older results with --page N.
+  --worker    Run the PHP checks in the local PatchRocket worker image.
+
+  --last-failed replays the selected database's recorded failures in a fresh
+  results directory. An explicit --last-failed-file PATH selects the record.
+EOF
+}
+
+fail() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
+require_phpunit() {
+    php_suite=$1
+    shift
+    command -v php >/dev/null 2>&1 || fail "Install PHP 8.2 or later, or run bin/check $php_suite --worker."
+    if ! php -r '
+        $missing = array_filter(array_slice($argv, 1), static fn ($name) => !extension_loaded($name));
+        $root = extension_loaded("posix") && 0 === posix_geteuid();
+        if (PHP_VERSION_ID < 80200) {
+            fwrite(STDERR, "PHP 8.2 or later is required.\n");
+        }
+        if ($missing) {
+            fwrite(STDERR, "Missing PHP extensions in ".PHP_BINARY." — ".implode(", ", $missing).".\n");
+        }
+        if ($root) {
+            fwrite(STDERR, "Run the PHP checks as a non-root user.\n");
+        }
+        exit(PHP_VERSION_ID < 80200 || $missing || $root ? 1 : 0);
+    ' -- "$@"; then
+        fail "Use a supported PHP CLI or run bin/check $php_suite --worker."
+    fi
+    if [ ! -r vendor/autoload.php ] || [ ! -r vendor/bin/phpunit ]; then
+        fail 'Install the PHP development dependencies with composer install.'
+    fi
+}
+
+run_phpunit() {
+    php vendor/bin/phpunit "$@"
+}
+
+require_full_phpunit() {
+    require_phpunit "$1" pdo_sqlite posix sodium openssl
+}
+
+check_php() {
+    require_full_phpunit php
+    command -v composer >/dev/null 2>&1 || fail 'Install Composer 2, or run bin/check php --worker.'
+    if [ ! -r vendor/bin/phpstan ]; then
+        fail 'Install the PHP development dependencies with composer install.'
+    fi
+
+    printf '\n%s\n' 'Composer and platform'
+    composer --no-interaction --no-plugins validate --strict
+    composer --no-interaction --no-plugins check-platform-reqs
+    printf '\n%s\n' 'PHPUnit'
+    run_phpunit --configuration phpunit.xml.dist
+    printf '\n%s\n' 'PHPStan'
+    php vendor/bin/phpstan analyse --level=3 src --no-progress --memory-limit=256M
+    printf '\n%s\n' 'Symfony containers'
+    APP_ENV=prod APP_DEBUG=0 php bin/console lint:container
+    APP_ENV=dev APP_DEBUG=1 php bin/console lint:container
+}
+
+check_worker() {
+    command -v docker >/dev/null 2>&1 || fail 'Install Docker to run PHP checks in the worker image.'
+    worker_image=patchrocket-worker:local
+    if ! docker image inspect "$worker_image" >/dev/null; then
+        fail 'Build the local worker image with docker build -f tools/worker.Dockerfile -t patchrocket-worker:local .'
+    fi
+    worker_user="$(id -u):$(id -g)"
+    if [ "$(id -u)" -eq 0 ]; then
+        worker_user=65534:65534
+    fi
+    set -- --entrypoint sh "$worker_image" -ec '
+            checkout=$(mktemp -d)
+            cp -R /checkout/. "$checkout/"
+            if [ ! -r "$checkout/vendor/autoload.php" ]; then
+                if ! cmp -s /tools/composer.lock "$checkout/composer.lock"; then
+                    printf "%s\n" "The worker image has a different Composer lockfile. Rebuild it with docker build -f tools/worker.Dockerfile -t patchrocket-worker:local ." >&2
+                    exit 1
+                fi
+                cp -R /tools/vendor "$checkout/vendor"
+            fi
+            cd "$checkout"
+            exec sh bin/check "$@"
+        ' sh "$@"
+    for path in .env composer.json composer.lock phpunit.xml.dist bin config src tests; do
+        set -- --mount "type=bind,source=$PWD/$path,target=/checkout/$path,readonly" "$@"
+    done
+    if [ -r vendor/autoload.php ] && [ -r vendor/bin/phpunit ] && [ -r vendor/bin/phpstan ]; then
+        set -- --mount "type=bind,source=$PWD/vendor,target=/checkout/vendor,readonly" "$@"
+    fi
+
+    docker run --rm --pull=never --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+        --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,size=512m --user "$worker_user" "$@"
+}
+
+publish_browser_record() {
+    case "$2" in
+        /*) record_target=$2 ;;
+        *) record_target=$PWD/$2 ;;
+    esac
+    record_directory=$(dirname "$record_target")
+    if [ -d "$record_target" ] || ! mkdir -p "$record_directory"; then
+        fail "Cannot write the browser failure record to $2. This run saved its record in $1."
+    fi
+    if ! latest_record=$(mktemp "$record_directory/.last-run.XXXXXXXX"); then
+        fail "Cannot write the browser failure record to $2. This run saved its record in $1."
+    fi
+    if ! { cp "$1" "$latest_record" && mv -f "$latest_record" "$record_target"; }; then
+        rm -f "$latest_record"
+        fail "Cannot write the browser failure record to $2. This run saved its record in $1."
+    fi
+}
+
+run_browser_checks() {
+    fixture_db=$1
+    results_root=$2
+    record_path=$3
+    repeat_each=$4
+    browser_override=$5
+    shift 5
+    run_root=$results_root/runs/$fixture_db
+    mkdir -p "$run_root"
+    run_dir=$(mktemp -d "$run_root/run.XXXXXXXX")
+    run_record=$run_dir/.last-run.json
+    custom_record=${record_path:-${PLAYWRIGHT_LAST_RUN_OUTPUT_FILE:-}}
+
+    printf 'Browser results: %s\n' "$run_dir"
+    run_status=0
+    PATCHROCKET_BROWSER_RECORD_DIR="$run_dir" \
+        node_modules/.bin/playwright test --output "$run_dir" --last-failed-file "$run_record" "$@" || run_status=$?
+    if [ -f "$run_record" ]; then
+        node bin/browser-run-record.mjs save "$run_record" "$fixture_db" "$repeat_each" "$browser_override" \
+            || fail "Cannot save replay options in $run_record."
+        publish_browser_record "$run_record" "${custom_record:-"$results_root/$fixture_db/.last-run.json"}"
+    fi
+    rmdir "$run_dir" 2>/dev/null || :
+    return "$run_status"
+}
+
+check_browser() {
+    replay=false
+    replay_test=
+    fixture_db_override=
+    results_root=node_modules/.cache/patchrocket-playwright
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --postgres) fixture_db_override=postgres ;;
+            --sqlite) fixture_db_override=sqlite ;;
+            --failure-history)
+                [ "$replay" = false ] || fail 'Use --failure-history to find a replay command.'
+                command -v node >/dev/null 2>&1 || fail 'Install Node.js to read saved browser failure records.'
+                shift
+                node bin/browser-run-record.mjs history "$results_root" "$fixture_db_override" "$@"
+                return
+                ;;
+            --replay) replay=true ;;
+            --replay-test)
+                case "${2-}" in
+                    ''|-*) fail 'Supply the test ID printed in the browser failure report.' ;;
+                esac
+                replay=true
+                replay_test=$2
+                shift
+                ;;
+            *) break ;;
+        esac
+        shift
+    done
+    command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
+        || fail 'Install Node.js and npm to run the browser checks.'
+    [ -x node_modules/.bin/playwright ] || fail 'Install the browser development dependencies with npm ci.'
+    replay_failed=false
+    browser_help=false
+    browser_list=false
+    custom_output=false
+    end_options=false
+    argument_value=
+    record_path=
+    repeat_each=
+    browser_override=
+    playwright_config=
+    for option do
+        shift
+        if [ "$end_options" = true ] || [ "$argument_value" = playwright ]; then
+            set -- "$@" "$option"
+            argument_value=
+            continue
+        fi
+        if [ "$argument_value" = record ]; then
+            case "$option" in
+                ''|-*) fail 'Supply a path for --last-failed-file.' ;;
+            esac
+            record_path=$option
+            argument_value=
+            continue
+        fi
+        if [ "$argument_value" = repeat_each ]; then
+            repeat_each=$option
+            set -- "$@" "$option"
+            argument_value=
+            continue
+        fi
+        if [ "$argument_value" = browser ]; then
+            browser_override=$option
+            set -- "$@" "$option"
+            argument_value=
+            continue
+        fi
+        if [ "$argument_value" = config ]; then
+            playwright_config=$option
+            set -- "$@" "$option"
+            argument_value=
+            continue
+        fi
+
+        case "$option" in
+            --) end_options=true ;;
+            --last-failed) replay_failed=true ;;
+            --last-failed-file)
+                argument_value=record
+                continue
+                ;;
+            --last-failed-file=*)
+                record_path=${option#*=}
+                [ -n "$record_path" ] || fail 'Supply a path for --last-failed-file.'
+                continue
+                ;;
+            -h|--help) browser_help=true ;;
+            --list) browser_list=true ;;
+            -c|--config)
+                custom_output=true
+                argument_value=config
+                ;;
+            --config=*)
+                custom_output=true
+                playwright_config=${option#*=}
+                ;;
+            -c?*)
+                custom_output=true
+                playwright_config=${option#-c}
+                ;;
+            --output)
+                custom_output=true
+                argument_value=playwright
+                ;;
+            --output=*) custom_output=true ;;
+            --repeat-each) argument_value=repeat_each ;;
+            --repeat-each=*) repeat_each=${option#*=} ;;
+            --browser) argument_value=browser ;;
+            --browser=*) browser_override=${option#*=} ;;
+            -g|--grep|-G|--grep-invert|-j|--workers|--add-reporter|--global-timeout|\
+            --max-failures|--project|--reporter|--retries|--run-agents|--shard|\
+            --test-list|--test-list-invert|--timeout|--trace|--tsconfig|--ui-host|--ui-port|--update-source-method)
+                argument_value=playwright
+                ;;
+        esac
+        set -- "$@" "$option"
+    done
+    [ "$argument_value" != record ] || fail 'Supply a path for --last-failed-file.'
+    if [ -n "$replay_test" ] && [ -n "$record_path" ]; then
+        fail 'Use --replay-test ID without --last-failed-file.'
+    fi
+    fixture_db=${fixture_db_override:-${PATCHROCKET_FIXTURE_DB:-sqlite}}
+    case "$fixture_db" in
+        sqlite|postgres) ;;
+        *) fail 'Set PATCHROCKET_FIXTURE_DB to sqlite or postgres for browser tests.' ;;
+    esac
+    if [ "$browser_help" = true ] || { [ "$replay" = false ] && [ "$replay_failed" = false ]; }; then
+        export PATCHROCKET_FIXTURE_DB="$fixture_db"
+        export PATCHROCKET_BROWSER_OVERRIDE="$browser_override"
+        if [ "$browser_help" = true ] || [ "$browser_list" = true ] || [ "$custom_output" = true ]; then
+            if [ -n "$record_path" ]; then
+                set -- "--last-failed-file=$record_path" "$@"
+            fi
+            node_modules/.bin/playwright test "$@"
+        else
+            run_browser_checks "$fixture_db" "$results_root" "$record_path" "$repeat_each" "$browser_override" "$@"
+        fi
+        return
+    fi
+
+    mkdir -p "$results_root/replays"
+    replay_dir=$(mktemp -d "$results_root/replays/run.XXXXXXXX")
+    replay_record=$replay_dir/.last-run.json
+    if [ -n "$replay_test" ]; then
+        node bin/browser-run-record.mjs seed-test "$replay_record" "$replay_test"
+        if [ "$replay_failed" = false ]; then
+            set -- --last-failed "$@"
+        fi
+    elif [ "$replay_failed" = true ]; then
+        last_run=${record_path:-${PLAYWRIGHT_LAST_RUN_OUTPUT_FILE:-"$results_root/$fixture_db/.last-run.json"}}
+        if ! recorded_options=$(node bin/browser-run-record.mjs seed "$last_run" "$replay_record"); then
+            rmdir "$replay_dir"
+            return 1
+        fi
+        if [ ! -s "$replay_record" ]; then
+            printf 'No failed browser tests are recorded in %s.\n' "$last_run"
+            rmdir "$replay_dir"
+            return 0
+        fi
+        recorded_database=${recorded_options%%:*}
+        recorded_repeat=${recorded_options#*:}
+        recorded_repeat=${recorded_repeat%%:*}
+        recorded_browser=${recorded_options##*:}
+        if [ -z "$fixture_db_override" ] && [ -n "$recorded_database" ]; then
+            fixture_db=$recorded_database
+        fi
+        if [ -z "$repeat_each" ] && [ -n "$recorded_repeat" ]; then
+            repeat_each=$recorded_repeat
+            set -- "--repeat-each=$repeat_each" "$@"
+        fi
+        if [ -z "$browser_override" ] && [ -n "$recorded_browser" ]; then
+            browser_override=$recorded_browser
+            set -- "--browser=$browser_override" "$@"
+        fi
+    fi
+
+    printf 'Default browser replay results: %s\n' "$replay_dir"
+    replay_status=0
+    PATCHROCKET_FIXTURE_DB="$fixture_db" PATCHROCKET_BROWSER_REPLAY=1 PATCHROCKET_BROWSER_OVERRIDE="$browser_override" \
+        PATCHROCKET_BROWSER_RECORD_DIR="$replay_dir" \
+        node_modules/.bin/playwright test --output "$replay_dir" \
+        --last-failed-file "$replay_record" --trace on "$@" || replay_status=$?
+    if [ "$browser_list" = true ]; then
+        rm -f "$replay_record"
+    elif [ -f "$replay_record" ]; then
+        node bin/browser-run-record.mjs save "$replay_record" "$fixture_db" "$repeat_each" "$browser_override" "$playwright_config" \
+            || fail "Cannot save replay options in $replay_record."
+        if [ "$replay_failed" = false ] && [ -n "$record_path" ]; then
+            publish_browser_record "$replay_record" "$record_path"
+        fi
+    fi
+    rmdir "$replay_dir" 2>/dev/null || :
+    return "$replay_status"
+}
+
+suite=all
+case "${1-}" in
+    ''|--worker) ;;
+    *) suite=$1; shift ;;
+esac
+case "$suite" in
+    -h|--help) usage; exit 0 ;;
+    browser) check_browser "$@"; exit ;;
+    phpunit)
+        if [ "${1-}" = '--worker' ]; then
+            shift
+            check_worker phpunit "$@"
+        else
+            if [ "$#" -eq 0 ] && [ ! -f phpunit.xml ]; then
+                require_full_phpunit phpunit
+            else
+                require_phpunit phpunit
+            fi
+            run_phpunit "$@"
+        fi
+        exit
+        ;;
+    all|php) ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+if [ "$#" -eq 0 ]; then
+    check_php
+elif [ "$#" -eq 1 ] && [ "$1" = '--worker' ]; then
+    check_worker php
+else
+    usage >&2
+    exit 2
+fi
+if [ "$suite" = all ]; then
+    check_browser
+fi

@@ -144,6 +144,15 @@ final class IdentityProviders
         return '' === $role ? null : ['role' => $role, 'label' => $principal['label'], 'provider' => $provider['alias'], 'subject' => $principal['subject']];
     }
 
+    public function blocked(array $provider, array $principal): bool
+    {
+        if (array_key_exists($principal['subject'], $provider['subjects'])) {
+            return '' === $provider['subjects'][$principal['subject']];
+        }
+
+        return in_array('', array_intersect_key($provider['claims'], array_fill_keys($principal['claims'], true)), true);
+    }
+
     private function rules(string $input): array
     {
         $rules = [];

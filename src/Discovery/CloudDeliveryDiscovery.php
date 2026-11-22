@@ -12,6 +12,11 @@ final class CloudDeliveryDiscovery
 {
     private const UUID = '/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iD';
     private const MAX_RESPONSE = 4194304;
+    private const RESOURCE_KINDS = [
+        'registries' => ['registry'],
+        'clusters' => ['cluster'],
+        'machines' => ['vm', 'harbor', 'jenkins', 'argocd'],
+    ];
 
     public function __construct(
         private readonly SecretManagers $secrets,
@@ -20,18 +25,20 @@ final class CloudDeliveryDiscovery
     ) {
     }
 
+    /** @param (callable(string, list<string>): void)|null $warning */
     public function discover(string $provider, string $scope, string $region, string $credential, ?callable $warning = null): array
     {
         $scope = trim($scope);
         $region = trim($region);
-        $valid = match ($provider) {
-            'azure' => preg_match(self::UUID, $scope),
-            'aws' => preg_match('/^[0-9]{12}$/D', $scope) && preg_match('/^[a-z]{2}(?:-[a-z]+)+-[0-9]+$/D', $region),
-            'gcp' => preg_match('/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/D', $scope),
-            default => false,
+        $error = match ($provider) {
+            'azure' => preg_match(self::UUID, $scope) ? null : 'Enter a valid Azure subscription ID.',
+            'aws' => !preg_match('/^[0-9]{12}$/D', $scope) ? 'Enter a 12-digit AWS account ID.'
+                : (preg_match('/^[a-z]{2}(?:-[a-z]+)+-[0-9]+$/D', $region) ? null : 'Enter a valid AWS region, such as eu-west-1.'),
+            'gcp' => preg_match('/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/D', $scope) ? null : 'Enter a valid Google Cloud project ID.',
+            default => 'Choose a supported cloud provider.',
         };
-        if (!$valid) {
-            throw new \DomainException('Enter an Azure subscription ID, an AWS account ID and region, or a Google Cloud project ID.');
+        if (null !== $error) {
+            throw new \DomainException($error);
         }
         $bundle = '' === $credential ? null : $this->secrets->bundle($credential);
         return $this->scratch->temporary(function (string $root) use ($provider, $scope, $region, $bundle, $warning): array {
@@ -49,13 +56,13 @@ final class CloudDeliveryDiscovery
     {
         $completed = 0;
         $candidates = [];
-        foreach ($groups as $name => $read) {
+        foreach ($groups as $resource => [$name, $read]) {
             try {
                 array_push($candidates, ...$read());
                 ++$completed;
             } catch (\DomainException) {
                 if (null !== $warning) {
-                    $warning('Could not list '.$name.'. Check cloud permissions and worker tooling.');
+                    $warning('Could not list '.$name.'. Check the cloud identity’s permissions and dashboard tooling.', self::RESOURCE_KINDS[$resource]);
                 }
             }
         }
@@ -89,14 +96,14 @@ final class CloudDeliveryDiscovery
         $base = '/subscriptions/'.$subscription.'/providers/';
 
         return [
-            'Azure container registries' => function () use ($base, $token): array {
+            'registries' => ['Azure container registries', function () use ($base, $token): array {
                 $result = [];
                 foreach ($this->azureList($base.'Microsoft.ContainerRegistry/registries', '2023-07-01', $token) as $item) {
                     $this->candidate($result, 'registry', $item['properties']['loginServer'] ?? '', (string) ($item['name'] ?? '').' · Azure Container Registry', $item['id'] ?? '');
                 }
                 return $result;
-            },
-            'Azure Kubernetes clusters' => function () use ($base, $token): array {
+            }],
+            'clusters' => ['Azure Kubernetes clusters', function () use ($base, $token): array {
                 $result = [];
                 foreach ($this->azureList($base.'Microsoft.ContainerService/managedClusters', '2024-05-01', $token) as $item) {
                     $name = $item['name'] ?? '';
@@ -104,8 +111,8 @@ final class CloudDeliveryDiscovery
                     $this->candidate($result, 'cluster', $address, $name.' · AKS', $item['id'] ?? '');
                 }
                 return $result;
-            },
-            'Azure virtual machines' => function () use ($base, $token): array {
+            }],
+            'machines' => ['Azure virtual machines', function () use ($base, $token): array {
                 $result = [];
                 foreach ($this->azureList($base.'Microsoft.Compute/virtualMachines', '2024-07-01', $token) as $item) {
                     $name = $item['name'] ?? '';
@@ -113,7 +120,7 @@ final class CloudDeliveryDiscovery
                     $this->machine($result, $name, $address, 'Azure VM', $item['id'] ?? '', $item['tags'] ?? []);
                 }
                 return $result;
-            },
+            }],
         ];
     }
 
@@ -159,7 +166,7 @@ final class CloudDeliveryDiscovery
         }
 
         return [
-            'AWS container registries' => function () use ($aws, $account): array {
+            'registries' => ['AWS container registries', function () use ($aws, $account): array {
                 $result = [];
                 foreach ($aws(['ecr', 'describe-repositories', '--registry-id='.$account])['repositories'] ?? [] as $item) {
                     $uri = $item['repositoryUri'] ?? '';
@@ -167,15 +174,15 @@ final class CloudDeliveryDiscovery
                     $this->candidate($result, 'registry', $host, 'Amazon ECR · '.$host, $host);
                 }
                 return $result;
-            },
-            'AWS Kubernetes clusters' => function () use ($aws, $account, $region): array {
+            }],
+            'clusters' => ['AWS Kubernetes clusters', function () use ($aws, $account, $region): array {
                 $result = [];
                 foreach ($aws(['eks', 'list-clusters'])['clusters'] ?? [] as $name) {
                     $this->candidate($result, 'cluster', $name, $name.' · Amazon EKS', $account.'/'.$region.'/'.$name);
                 }
                 return $result;
-            },
-            'AWS virtual machines' => function () use ($aws): array {
+            }],
+            'machines' => ['AWS virtual machines', function () use ($aws): array {
                 $result = [];
                 foreach ($aws(['ec2', 'describe-instances'])['Reservations'] ?? [] as $reservation) {
                     foreach ($reservation['Instances'] ?? [] as $instance) {
@@ -186,7 +193,7 @@ final class CloudDeliveryDiscovery
                     }
                 }
                 return $result;
-            },
+            }],
         ];
     }
 
@@ -222,7 +229,7 @@ final class CloudDeliveryDiscovery
         $gcloud = fn (array $args): array => $this->command(['gcloud', ...$args, '--project='.$project, '--quiet', '--format=json'], $env);
 
         return [
-            'Google Artifact Registry repositories' => function () use ($gcloud): array {
+            'registries' => ['Google Artifact Registry repositories', function () use ($gcloud): array {
                 $result = [];
                 foreach ($gcloud(['artifacts', 'repositories', 'list', '--location=all']) as $item) {
                     if ('DOCKER' === ($item['format'] ?? null)
@@ -232,8 +239,8 @@ final class CloudDeliveryDiscovery
                     }
                 }
                 return $result;
-            },
-            'Google Kubernetes clusters' => function () use ($gcloud, $project): array {
+            }],
+            'clusters' => ['Google Kubernetes clusters', function () use ($gcloud, $project): array {
                 $result = [];
                 foreach ($gcloud(['container', 'clusters', 'list']) as $item) {
                     $name = $item['name'] ?? '';
@@ -241,8 +248,8 @@ final class CloudDeliveryDiscovery
                         $project.'/'.($item['location'] ?? '').'/'.$name);
                 }
                 return $result;
-            },
-            'Google Compute Engine instances' => function () use ($gcloud): array {
+            }],
+            'machines' => ['Google Compute Engine instances', function () use ($gcloud): array {
                 $result = [];
                 foreach ($gcloud(['compute', 'instances', 'list']) as $item) {
                     $name = $item['name'] ?? '';
@@ -251,7 +258,7 @@ final class CloudDeliveryDiscovery
                     $this->machine($result, $name, $address, 'Compute Engine', $item['selfLink'] ?? $name, $item['labels'] ?? []);
                 }
                 return $result;
-            },
+            }],
         ];
     }
 

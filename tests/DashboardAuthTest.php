@@ -4,9 +4,11 @@ declare(strict_types=1);
 use App\Asset\Inventory;
 use App\Audit\Store;
 use App\Auth\DashboardAccounts;
+use App\Auth\DashboardReturnPath;
 use App\Auth\DashboardSession;
 use App\Auth\IdentityProviders;
 use App\Auth\OAuthSignIn;
+use App\Controller\AccountApi;
 use App\Discovery\Repository;
 use App\Secrets\AnsibleVault;
 use App\Secrets\SecretManagers;
@@ -14,9 +16,13 @@ use Doctrine\DBAL\DriverManager;
 use Firebase\JWT\JWT;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\DependencyInjection\Container;
 use Symfony\Component\HttpClient\MockHttpClient;
 use Symfony\Component\HttpClient\Response\JsonMockResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Session\Session;
+use Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage;
+use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
 
 final class DashboardAuthTest extends TestCase
 {
@@ -57,6 +63,20 @@ final class DashboardAuthTest extends TestCase
         self::assertSame($principal, $this->accounts->login('ADMIN', 'temporary fixture passphrase'));
         $this->expectException(\DomainException::class);
         $this->accounts->setup('other', 'another fixture passphrase', $otp);
+    }
+
+    public function testReturnPathKeepsFiltersAndAnchorsAndRejectsExternalOrAuthUrls(): void
+    {
+        $target = '/findings?severity=HIGH&advisory=PP-FIXTURE%2F1#results';
+        self::assertSame($target, DashboardReturnPath::validate($target));
+        self::assertSame('/app/queue', DashboardReturnPath::validate('/app/queue'));
+        foreach ([
+            '//example.test', 'https://example.test', '/\\example.test', '/%2Fexample.test', '/%5Cexample.test',
+            "/\texample.test", "/findings\r\nLocation: /", '/login/provider/start', '/login', '/logout', '/setup',
+            '/api/profile', ['/findings'],
+        ] as $invalid) {
+            self::assertNull(DashboardReturnPath::validate($invalid));
+        }
     }
 
     public function testLocalRoleChangesInvalidateExistingSessions(): void
@@ -107,6 +127,97 @@ final class DashboardAuthTest extends TestCase
         self::assertArrayNotHasKey('secret', $this->providers->all()[0]);
         $this->providers->save(array_replace($data, ['secret' => '', 'default_role' => 'viewer']));
         self::assertNull($this->providers->authenticated($principal('unknown')));
+    }
+
+    public function testLinkedIdentityUsesCanonicalRoleAndCannotFallbackAfterUnlink(): void
+    {
+        $this->providers->save($this->configuration() + ['default_role' => 'viewer']);
+        $provider = $this->providers->get('company');
+        $identity = [
+            'type' => 'sso', 'provider' => 'company', 'version' => $provider['version'],
+            'subject' => 'verified-subject', 'label' => 'Example user', 'claims' => [],
+        ];
+        $sessions = new DashboardSession($this->accounts, $this->providers);
+        $local = $this->accounts->setup('admin', 'temporary fixture passphrase', $this->accounts->issueBootstrap());
+        $this->accounts->save('another', 'another fixture passphrase', 'viewer');
+        $legacySession = $this->session($sessions, $sessions->signInPrincipal($provider, $identity));
+        self::assertSame('viewer', $sessions->user($legacySession)['role']);
+
+        $updated = $this->accounts->link($local, $provider, $identity);
+        self::assertNull($sessions->user($legacySession));
+        self::assertNull($this->accounts->authenticated($local));
+        $linkedSession = $this->session($sessions, $sessions->signInPrincipal($provider, $identity));
+        self::assertSame('admin', $sessions->user($linkedSession)['role']);
+        self::assertSame('admin', $sessions->user($linkedSession)['account']);
+        self::assertSame($updated, $sessions->accountPrincipal($linkedSession));
+        self::assertCount(2, $this->accounts->methods('admin'));
+
+        try {
+            $this->accounts->link($this->accounts->login('another', 'another fixture passphrase'), $provider, $identity);
+            self::fail('A provider identity may belong to only one account.');
+        } catch (\DomainException $error) {
+            self::assertStringContainsString('already linked', $error->getMessage());
+        }
+        $this->accounts->unlink($updated, $this->accounts->linked($provider, $identity['subject'])['id']);
+        self::assertNull($sessions->user($linkedSession));
+        self::assertNull($sessions->signInPrincipal($provider, $identity));
+        self::assertCount(1, $this->accounts->methods('admin'));
+        self::assertSame('admin', $this->accounts->login('admin', 'temporary fixture passphrase')['subject']);
+    }
+
+    public function testDisableAndPasswordChangeRevokeAccountSessions(): void
+    {
+        $this->accounts->save('engineer', 'temporary fixture passphrase', 'operator');
+        $principal = $this->accounts->login('engineer', 'temporary fixture passphrase');
+        $updated = $this->accounts->changePassword($principal, 'temporary fixture passphrase', 'new fixture passphrase');
+        self::assertNull($this->accounts->authenticated($principal));
+        self::assertNull($this->accounts->login('engineer', 'temporary fixture passphrase'));
+        self::assertSame($updated, $this->accounts->login('engineer', 'new fixture passphrase'));
+        $this->accounts->save('engineer', '', 'operator', disabled: true, actor: 'admin');
+        self::assertNull($this->accounts->authenticated($updated));
+        self::assertNull($this->accounts->login('engineer', 'new fixture passphrase'));
+        $this->accounts->save('engineer', '', 'operator', disabled: false, actor: 'admin');
+        self::assertNotNull($this->accounts->login('engineer', 'new fixture passphrase'));
+    }
+
+    public function testRecentConfirmationExpiresWithoutInvalidatingTheSignIn(): void
+    {
+        $password = 'temporary fixture passphrase';
+        $principal = $this->accounts->setup('admin', $password, $this->accounts->issueBootstrap());
+        $sessions = new DashboardSession($this->accounts, $this->providers);
+        $request = $this->session($sessions, $principal);
+        $storage = $request->getSession();
+        $record = $storage->get('patchrocket.session');
+        $record['verified'] = time() - 900;
+        $storage->set('patchrocket.session', $record);
+
+        self::assertSame(0, $sessions->recentRemaining($request));
+        self::assertFalse($sessions->recent($request));
+        self::assertSame('admin', $sessions->user($request)['account']);
+
+        $csrf = $this->createStub(CsrfTokenManagerInterface::class);
+        $csrf->method('isTokenValid')->willReturn(true);
+        $container = new Container();
+        $container->set('security.csrf.token_manager', $csrf);
+        $api = new AccountApi($this->accounts, $sessions, $this->providers, $csrf);
+        $api->setContainer($container);
+        $revoke = Request::create('http://localhost/api/profile/revoke-sessions', 'POST', cookies: [$storage->getName() => 'test'], content: '{"account":"admin"}');
+        $revoke->setSession($storage);
+        $response = $api->updateProfile($revoke, 'revoke-sessions');
+        self::assertSame(403, $response->getStatusCode());
+        self::assertSame('profile_confirmation_required', json_decode($response->getContent(), true)['code']);
+
+        $sessions->confirmPassword($request, $password);
+        self::assertTrue($sessions->recent($request));
+        self::assertGreaterThan(895, $sessions->recentRemaining($request));
+        self::assertLessThanOrEqual(900, $sessions->recentRemaining($request));
+    }
+
+    public function testCannotDisableTheFirstAdministrator(): void
+    {
+        $this->accounts->setup('admin', 'temporary fixture passphrase', $this->accounts->issueBootstrap());
+        $this->expectExceptionMessage('The first administrator retains administrative access.');
+        $this->accounts->save('admin', '', 'admin', disabled: true);
     }
 
     public static function oidcClaims(): array
@@ -167,5 +278,15 @@ final class DashboardAuthTest extends TestCase
             'alias' => 'company', 'type' => 'oidc', 'issuer' => 'https://id.example.invalid',
             'client_id' => 'fixture-client', 'secret' => 'synthetic-client-secret',
         ];
+    }
+
+    private function session(DashboardSession $sessions, array $principal): Request
+    {
+        $session = new Session(new MockArraySessionStorage());
+        $request = Request::create('http://localhost/app/profile', cookies: [$session->getName() => 'test']);
+        $request->setSession($session);
+        $sessions->start($request, $principal);
+
+        return $request;
     }
 }

@@ -63,18 +63,21 @@ final class ChangeWorker
         }
     }
 
-    public function independentlyVerify(Change $change): bool
+    /** @param (callable(bool): bool)|null $acceptResult Called inside the evidence transaction. */
+    public function independentlyVerify(Change $change, ?callable $acceptResult = null): bool
     {
         if ('awaiting_approval' !== $change->getStatus() || !isset($change->data['patch'])) {
             throw new \DomainException('Independent verification requires a candidate awaiting approval.');
         }
         $data = $change->data;
-        if (!hash_equals($data['patch_sha256'], hash('sha256', $data['patch']))) {
+        if (!is_string($data['patch_sha256'] ?? null) || !is_string($data['patch'])
+            || !hash_equals($data['patch_sha256'], hash('sha256', $data['patch']))) {
             throw new \DomainException('Candidate patch integrity check failed.');
         }
 
+        $goChecks = [];
         try {
-            $checks = $this->repository->temporary(function (string $scratch) use ($change, $data): array {
+            $checks = $this->repository->temporary(function (string $scratch) use ($change, $data, &$goChecks): array {
                 if ('iac-image' === $change->strategy) {
                     [$patch, $artifact] = $this->infrastructurePatch($change, $scratch);
 
@@ -101,8 +104,8 @@ final class ChangeWorker
                 $apply = new Process(['git', 'apply', '--whitespace=nowarn', '-'], $workspace, input: $data['patch'], timeout: 15);
                 $apply->mustRun();
                 $this->go->verify($workspace, $scratch, $before, $this->artifacts->hashes($workspace),
-                    function (string $name, array $result) use ($change): void {
-                        $this->store->record($change->id, 'check', ['label' => $name, 'round' => 0, ...$result]);
+                    static function (string $name, array $result) use (&$goChecks): void {
+                        $goChecks[] = ['label' => $name, 'round' => 0, ...$result];
                     });
                 if ('docker-base' === $change->strategy) {
                     $checks = [];
@@ -147,7 +150,13 @@ final class ChangeWorker
             $checks = ['Reconstruct candidate' => ['passed' => false, 'log' => 'Could not reproduce the verified candidate.']];
         }
         $passed = !array_filter($checks, static fn (array $check): bool => !$check['passed']);
-        $this->store->db->transactional(function () use ($change, $data, $checks, $passed): void {
+        $this->store->db->transactional(function () use ($change, $data, $checks, $goChecks, $passed, $acceptResult): void {
+            if ($acceptResult && !$acceptResult($passed)) {
+                return;
+            }
+            foreach ($goChecks as $check) {
+                $this->store->record($change->id, 'check', $check);
+            }
             foreach ($checks as $label => $check) {
                 $this->store->record($change->id, 'check', ['label' => 'Independent · '.$label, 'round' => 0, ...$check]);
             }
@@ -257,10 +266,10 @@ final class ChangeWorker
         $data = $change->data;
         $plan = $data['plan'];
         $file = $plan['file'];
-        $raw = $this->repository->committedFile($data['repository'], $data['revision'], $file);
+        [$raw, $edited] = $this->iac->editCommitted($this->repository, $data['repository'], $data['revision'], $data['base_branch'] ?? '', $plan);
         $fs = new Filesystem();
         $fs->dumpFile($scratch.'/baseline/work/'.$file, $raw);
-        $fs->dumpFile($scratch.'/work/'.$file, $this->iac->edit($raw, $plan));
+        $fs->dumpFile($scratch.'/work/'.$file, $edited);
         $patch = $this->artifacts->diff($scratch, $this->artifacts->hashes($scratch.'/baseline/work'),
             $this->artifacts->hashes($scratch.'/work'), [$file]);
 

@@ -176,6 +176,22 @@ final class Store
         return json_encode($data, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES);
     }
 
+    public function jsonText(string $column, string $key): string
+    {
+        return $this->db->getDatabasePlatform() instanceof \Doctrine\DBAL\Platforms\SQLitePlatform
+            ? "CAST(json_extract($column, '$.$key') AS TEXT)"
+            : "(CAST($column AS jsonb)->>'$key')";
+    }
+
+    public function jsonString(string $column, string $key): string
+    {
+        $isString = $this->db->getDatabasePlatform() instanceof \Doctrine\DBAL\Platforms\SQLitePlatform
+            ? "json_type($column, '$.$key') = 'text'"
+            : "jsonb_typeof(CAST($column AS jsonb)->'$key') = 'string'";
+
+        return "CASE WHEN $isString THEN ".$this->jsonText($column, $key).' END';
+    }
+
     private static function decode(array $row): array
     {
         if (isset($row['data'])) {

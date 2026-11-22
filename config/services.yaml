@@ -4,4 +4,4 @@ services:
         autoconfigure: true
     App\:
         resource: '../src/'
-        exclude: ['../src/Kernel.php', '../src/Remediation/Change.php', '../src/Remediation/RunChange.php', '../src/Settings/RunInventory.php']
+        exclude: ['../src/Kernel.php', '../src/Remediation/Change.php', '../src/Remediation/RunChange.php', '../src/Remediation/RunIndependentVerification.php', '../src/Remediation/RunRegistryCleanup.php', '../src/Remediation/RunVmPackage.php', '../src/Settings/RunInventory.php', '../src/Settings/RunKubernetesCheck.php']

@@ -9,6 +9,7 @@ use Doctrine\DBAL\DriverManager;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpClient\MockHttpClient;
 use Symfony\Component\HttpClient\Response\JsonMockResponse;
+use Symfony\Component\HttpClient\Response\MockResponse;
 
 final class PullRequestEvidenceTest extends TestCase
 {
@@ -65,7 +66,7 @@ final class PullRequestEvidenceTest extends TestCase
         }
     }
 
-    public function testMergeChecksProviderHeadAndRecordsOnlyConfirmedMerge(): void
+    public function testMergeChecksProviderHeadAndReconcilesPendingConfirmation(): void
     {
         $root = sys_get_temp_dir().'/patchrocket-pr-'.bin2hex(random_bytes(8));
         mkdir($root, 0700);
@@ -96,17 +97,24 @@ final class PullRequestEvidenceTest extends TestCase
                     'patch_sha256' => $this->change->data['patch_sha256']]);
                 foreach ([true, false] as $tampered) {
                     $writes = 0;
-                    $http = new MockHttpClient(function (string $method, string $endpoint, array $options) use ($github, $head, $tampered, &$writes): JsonMockResponse {
+                    $merged = false;
+                    $http = new MockHttpClient(function (string $method, string $endpoint, array $options) use ($github, $head, $tampered, &$writes, &$merged): MockResponse {
                         if ('GET' === $method) {
                             $observed = $tampered ? str_repeat('c', 40) : $head;
+                            if (!$github && str_contains($endpoint, '/commit/')) {
+                                $baseRevision = $this->change->data['revision'];
+                                $prefix = basename($endpoint);
+                                self::assertContains($prefix, [substr($baseRevision, 0, 12), substr($observed, 0, 12)]);
+                                return new JsonMockResponse(['hash' => str_starts_with($baseRevision, $prefix) ? $baseRevision : $observed]);
+                            }
                             return new JsonMockResponse($github ? [
-                                'state' => 'open', 'draft' => false,
+                                'state' => $merged ? 'closed' : 'open', 'draft' => false, 'merged' => $merged,
                                 'head' => ['sha' => $observed, 'ref' => 'patchrocket/fixture', 'repo' => ['full_name' => 'team/repo']],
                                 'base' => ['ref' => 'main', 'sha' => $this->change->data['revision']],
                             ] : [
-                                'state' => 'OPEN', 'draft' => false,
-                                'source' => ['commit' => ['hash' => $observed], 'branch' => ['name' => 'patchrocket/fixture'], 'repository' => ['full_name' => 'team/repo']],
-                                'destination' => ['branch' => ['name' => 'main'], 'commit' => ['hash' => $this->change->data['revision']]],
+                                'state' => $merged ? 'MERGED' : 'OPEN', 'draft' => false,
+                                'source' => ['commit' => ['hash' => substr($observed, 0, 12)], 'branch' => ['name' => 'patchrocket/fixture'], 'repository' => ['full_name' => 'team/repo']],
+                                'destination' => ['branch' => ['name' => 'main'], 'commit' => ['hash' => substr($this->change->data['revision'], 0, 12)]],
                             ]);
                         }
                         ++$writes;
@@ -115,13 +123,17 @@ final class PullRequestEvidenceTest extends TestCase
                         if ($github) {
                             self::assertSame($head, json_decode($options['body'], true)['sha']);
                         }
-                        return new JsonMockResponse($github ? ['merged' => true] : ['state' => 'MERGED']);
+                        return $github ? new JsonMockResponse(['merged' => false]) : new MockResponse('', ['http_code' => 202]);
                     });
                     $service = new \App\Remediation\DashboardPullRequests($this->store, $connections, $git, $this->publisher,
-                        new \App\Remediation\ApprovalPolicy($this->store, $inventory), $http);
+                        new \App\Remediation\ApprovalPolicy($this->store, $inventory), $http, new BitbucketPullRequests($http));
                     try {
-                        self::assertStringContainsString('merged', $service->merge($this->change, 'connection'));
+                        self::assertStringContainsString('Awaiting provider confirmation', $service->merge($this->change, 'connection'));
                         self::assertFalse($tampered);
+                        self::assertStringContainsString('still open', $service->merge($this->change, 'connection', checkOnly: true));
+                        $merged = true;
+                        self::assertSame('Pull request merged.', $service->merge($this->change, 'connection', checkOnly: true));
+                        self::assertSame('Pull request merge already confirmed.', $service->merge($this->change, 'connection', checkOnly: true));
                         self::assertSame(1, $writes);
                     } catch (\DomainException $error) {
                         self::assertTrue($tampered, $error->getMessage());
@@ -131,7 +143,8 @@ final class PullRequestEvidenceTest extends TestCase
                 }
             }
             self::assertSame('approved', $this->change->getStatus());
-            self::assertCount(2, $this->store->rows("SELECT * FROM audit WHERE kind = 'merge'"));
+            $events = $this->store->rows("SELECT * FROM audit WHERE kind = 'merge' ORDER BY id");
+            self::assertSame([false, true, false, true], array_column(array_column($events, 'data'), 'confirmed'));
         } finally {
             if (null === $oldPath) { unset($_ENV['PATH']); } else { $_ENV['PATH'] = $oldPath; }
             putenv(false === $processPath ? 'PATH' : 'PATH='.$processPath);

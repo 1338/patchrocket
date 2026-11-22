@@ -35,7 +35,20 @@ JENKINS);
             (new Process(['git', '-C', $git, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
                 '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture']))->mustRun();
             $revision = $repository->revision($git);
+            $repository->temporary(function (string $scratch) use ($repository, $git, $revision): void {
+                $previousMask = umask(0077);
+                try {
+                    $workspace = $repository->snapshot($git, $revision, $scratch);
+                    self::assertSame(0700, fileperms($scratch) & 0777);
+                    self::assertSame(0644, fileperms($workspace.'/web/Dockerfile') & 0777);
+                } finally {
+                    umask($previousMask);
+                }
+            });
             $source = $repository->register($git, [], canonicalUrl: 'ssh://git@git.example/project/frontend.git');
+            $inventory->asset('repository', 'legacy-frontend', 'Frontend (legacy)', [
+                'path' => $git, 'canonical_url' => 'https://git.example/project/frontend.git',
+            ]);
             $infra = $inventory->asset('repository', 'infra', 'infra', ['role' => 'infrastructure']);
             $ns = 'apps';
             $workload = $inventory->asset('workload', 'web-uid', 'web', ['scope' => 'cluster/'.$ns, 'controller' => 'Deployment']);

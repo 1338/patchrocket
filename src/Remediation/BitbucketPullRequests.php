@@ -57,10 +57,10 @@ final class BitbucketPullRequests
         return $this->request('GET', $repository, $token, [], 200, '/pullrequests/'.$number);
     }
 
-    public function mergeRevision(string $repository, string $hash, #[\SensitiveParameter] string $token): string
+    public function resolveRevision(string $repository, string $hash, #[\SensitiveParameter] string $token): string
     {
         if (!preg_match('/^[a-f0-9]{7,40}$/D', $hash)) {
-            throw new \DomainException('Bitbucket marked the pull request merged without a usable merge commit.');
+            throw new \DomainException('Bitbucket returned an invalid commit ID.');
         }
         if (40 === strlen($hash)) {
             return $hash;
@@ -68,7 +68,7 @@ final class BitbucketPullRequests
         $commit = $this->request('GET', $repository, $token, [], 200, '/commit/'.$hash);
         $revision = $commit['hash'] ?? '';
         if (!is_string($revision) || !preg_match('/^[a-f0-9]{40}$/D', $revision) || !str_starts_with($revision, $hash)) {
-            throw new \DomainException('Bitbucket could not confirm the full merge commit for the abbreviated hash.');
+            throw new \DomainException('Bitbucket could not confirm the full commit ID for the abbreviated hash.');
         }
 
         return $revision;

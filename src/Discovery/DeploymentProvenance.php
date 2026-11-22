@@ -91,7 +91,7 @@ final class DeploymentProvenance
             foreach ($workloads as $workload => [$app, $evidence]) {
                 $this->inventory->link($workload, 'MANAGED_BY', $app, $evidence);
             }
-            foreach ($this->store->rows("SELECT id, data FROM assets WHERE kind = 'image'") as $image) {
+            foreach ($this->store->iterate("SELECT id, data FROM assets WHERE kind = 'image'") as $image) {
                 $data = $image['data'];
                 $previous = $data['build_sources'] ?? [];
                 $updated = $previous;
@@ -162,14 +162,18 @@ final class DeploymentProvenance
             return [];
         }
         $repositories = $candidates = $cache = $result = [];
-        foreach ($this->store->iterate("SELECT id, name, data FROM assets WHERE kind = 'repository'") as $row) {
+        foreach ($this->store->iterate("SELECT id, name, data FROM assets WHERE kind = 'repository' ORDER BY id") as $row) {
             $data = $row['data'];
             if (isset($data['subdirectory']) || ($data['role'] ?? null) === 'infrastructure' || empty($data['path'])) {
                 continue;
             }
             $identity = Repository::identity($data['canonical_url'] ?? $data['source_url'] ?? $this->repository->origin($data['path']));
             if ($identity) {
-                $repositories[$identity][] = $row;
+                $path = $data['path'];
+                // Older inventory records can share a checkout with its current registration.
+                if (!isset($repositories[$identity][$path]) || Inventory::assetId('repository', $path) === $row['id']) {
+                    $repositories[$identity][$path] = $row;
+                }
             }
         }
         foreach ($apps as $id => $app) {
@@ -177,7 +181,7 @@ final class DeploymentProvenance
             foreach ($definition['sources'] ?? [] as $source) {
                 $identity = Repository::identity($source['repository']);
                 if (null !== $identity && 1 === count($repositories[$identity] ?? [])) {
-                    $row = $repositories[$identity][0];
+                    $row = reset($repositories[$identity]);
                     $candidates[$id][$row['id']] = ['path' => $row['data']['path'], 'name' => $row['name']];
                 }
             }

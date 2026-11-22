@@ -13,6 +13,7 @@ final class GoChecksTest extends TestCase
 {
     private string $root;
     private string $previousPath;
+    private ?string $previousEnvPath;
     private GoChecks $checks;
 
     protected function setUp(): void
@@ -30,7 +31,9 @@ esac
 SH);
         chmod($this->root.'/bin/docker', 0700);
         $this->previousPath = getenv('PATH');
-        putenv('PATH='.$this->root.'/bin:'.$this->previousPath);
+        $this->previousEnvPath = $_ENV['PATH'] ?? null;
+        $_ENV['PATH'] = $this->root.'/bin:'.$this->previousPath;
+        putenv('PATH='.$_ENV['PATH']);
         $store = new Store(DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true]));
         $store->install();
         $this->checks = new GoChecks(new Sandbox('worker', 'resolver', new OperatorSettings($store)));
@@ -39,6 +42,11 @@ SH);
     protected function tearDown(): void
     {
         putenv('PATH='.$this->previousPath);
+        if (null === $this->previousEnvPath) {
+            unset($_ENV['PATH']);
+        } else {
+            $_ENV['PATH'] = $this->previousEnvPath;
+        }
         (new Filesystem())->remove($this->root);
     }
 

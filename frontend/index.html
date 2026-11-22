@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PatchRocket</title>
+    <link rel="icon" href="/favicon.ico">
+</head>
+<body>
+    <div id="app"></div>
+    <main id="dashboard-loading" class="error-screen">
+        <section class="panel error-card">
+            <h1>PatchRocket</h1>
+            <p id="dashboard-loading-message" class="error-message" role="status">Loading the dashboard…</p>
+            <a class="button secondary" href="" data-dashboard-retry>Try again</a>
+            <noscript><p class="error-message dashboard-no-script">Enable JavaScript to use the PatchRocket dashboard.</p></noscript>
+        </section>
+    </main>
+    <!-- dashboard-data -->
+    <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>

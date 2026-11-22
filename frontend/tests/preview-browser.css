@@ -1,0 +1,27 @@
+.fixture-preview-announcement {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+.fixture-preview-update:not([hidden]) {
+    padding: .5rem clamp(.75rem, 3vw, 1.5rem);
+    color: var(--text);
+    background: var(--surface);
+    border-block-end: 1px solid var(--accent);
+}
+
+.fixture-preview-update[data-failed="true"] { border-block-end-color: var(--warning); }
+.fixture-preview-update [hidden] { display: none; }
+
+.fixture-preview-actions:not([hidden]) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .6rem;
+}
+
+.fixture-preview-actions > span { min-inline-size: 0; overflow-wrap: anywhere; }

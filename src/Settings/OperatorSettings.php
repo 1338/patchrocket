@@ -126,12 +126,19 @@ final class OperatorSettings
 
     private function registryId(string $host): string
     {
-        $host = strtolower(trim($host));
-        if (!preg_match('/^[a-z0-9][a-z0-9.-]*(?::[0-9]+)?$/D', $host)) {
+        $host = self::normalizeRegistryHost($host);
+        if (null === $host) {
             throw new \DomainException('Enter one exact registry hostname, with an optional port.');
         }
 
         return 'registry:'.substr(hash('sha256', $host), 0, 48);
+    }
+
+    public static function normalizeRegistryHost(string $host): ?string
+    {
+        $host = strtolower(trim($host));
+
+        return preg_match('/^[a-z0-9][a-z0-9.-]*(?::[0-9]+)?$/D', $host) ? $host : null;
     }
 
     public function saveWorker(array $input): void

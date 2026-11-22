@@ -23,8 +23,8 @@ final class PullRequests
     public function publish(Change $change, string $destination, string $base, ?string $credential = null, string $provider = 'github'): string
     {
         if (!in_array($change->getStatus(), ['awaiting_approval', 'approved', 'monitoring', 'deployed'], true)
-            || !preg_match('#^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}/[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$#D', $destination)
-            || !preg_match('#^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,100}$#D', $base)
+            || !self::validDestination($destination)
+            || !self::validBase($base)
             || !in_array($provider, ['github', 'bitbucket'], true)) {
             throw new \DomainException('Choose a verified patch, supported repository, and base branch.');
         }
@@ -32,8 +32,7 @@ final class PullRequests
         $host = 'bitbucket' === $provider ? 'bitbucket.org' : 'github.com';
         $remote = 'https://'.$host.'/'.$destination.'.git';
         $data = $change->data;
-        if ('iac-image' === $change->strategy && (($data['source_url'] ?? null) !== $remote || ($data['base_branch'] ?? null) !== $base
-            || empty($data['image_verification']))) {
+        if ('iac-image' === $change->strategy && !self::matchesTracedTarget($change, $remote, $base)) {
             throw new \DomainException('Publish the verified manifest patch to its traced infrastructure repository and branch.');
         }
         if (!hash_equals($data['patch_sha256'], hash('sha256', $data['patch']))) {
@@ -45,8 +44,7 @@ final class PullRequests
         $environment = [];
         $bitbucketToken = null;
         if ('bitbucket' === $provider) {
-            if (null === $credential || ($data['source_url'] ?? null) !== $remote || ($data['base_branch'] ?? null) !== $base
-                || empty($data['image_verification'])) {
+            if (null === $credential || !self::matchesTracedTarget($change, $remote, $base)) {
                 throw new \DomainException('Publish a verified image patch to its traced Bitbucket repository and branch using a managed credential.');
             }
             $bundle = $this->gitCredentials->credentials($credential, $remote);
@@ -68,9 +66,14 @@ final class PullRequests
         }
         $url = $this->repository->temporary(function (string $scratch) use ($branch, $remote, $destination, $base, $data, $environment, $bitbucketToken, $body, &$publishedCommit): string {
             $this->git(['check-ref-format', "refs/heads/$base"], $scratch);
-            $this->git(['clone', '--no-checkout', '--template=', '--local', '--', $data['repository'], 'publish'], $scratch);
+            $this->git(['init', '--template=', 'publish'], $scratch);
             $workspace = $scratch.'/publish';
-            $this->git(['checkout', '--detach', $data['revision']], $workspace);
+            $this->git(['fetch', '--depth=1', '--no-tags', '--', $remote, "refs/heads/$base"], $workspace, env: $environment);
+            $verifiedBase = trim($this->git(['rev-parse', '--verify', 'FETCH_HEAD^{commit}'], $workspace));
+            if ($verifiedBase !== $data['revision']) {
+                throw new \DomainException('The remote base changed. Prepare and verify a new patch against its current revision before publishing.');
+            }
+            $this->git(['checkout', '--detach', 'FETCH_HEAD'], $workspace);
             $this->git(['apply', '--index', '--whitespace=nowarn', '-'], $workspace, $data['patch']);
             $tree = trim($this->git(['write-tree'], $workspace));
             $sourceDate = trim($this->git(['show', '--no-patch', '--format=%cI', $data['revision']], $workspace));
@@ -119,6 +122,22 @@ final class PullRequests
             'base' => $base, 'head' => $publishedCommit, 'patch_sha256' => $data['patch_sha256']]);
 
         return $url;
+    }
+
+    public static function validDestination(string $destination): bool
+    {
+        return 1 === preg_match('#^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}/[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$#D', $destination);
+    }
+
+    public static function validBase(string $base): bool
+    {
+        return 1 === preg_match('#^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,100}$#D', $base);
+    }
+
+    public static function matchesTracedTarget(Change $change, string $remote, string $base): bool
+    {
+        return ($change->data['source_url'] ?? null) === $remote && ($change->data['base_branch'] ?? null) === $base
+            && !empty($change->data['image_verification']);
     }
 
     public function evidence(Change $change): string

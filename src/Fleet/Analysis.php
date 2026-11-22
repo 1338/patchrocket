@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Fleet;
 
+use App\Asset\Inventory;
 use App\Audit\Store;
 
 final class Analysis
@@ -11,14 +12,26 @@ final class Analysis
     {
     }
 
-    public function report(): array
+    public function report(bool $includeFindings = true): array
     {
-        $assets = array_column($this->store->rows('SELECT * FROM assets'), null, 'id');
-        $incoming = [];
-        $outgoing = [];
-        foreach ($this->store->rows('SELECT * FROM asset_links') as $edge) {
-            $incoming[$edge['kind']][$edge['target_id']][] = $edge['source_id'];
-            $outgoing[$edge['kind']][$edge['source_id']][] = $edge['target_id'];
+        $digest = $this->store->jsonText('data', 'digest');
+        $assets = array_column($this->store->rows("SELECT id, kind, name, $digest AS digest FROM assets"), null, 'id');
+        $hosts = $sources = [];
+        foreach ($this->store->iterate("SELECT kind, source_id, target_id FROM asset_links
+            WHERE kind IN ('HOSTS', 'BUILT_FROM', 'ASSOCIATED_SOURCE')") as $edge) {
+            if ('HOSTS' === $edge['kind']) {
+                $hosts[$edge['target_id']][] = $edge['source_id'];
+            } else {
+                $sources[$edge['kind']][$edge['source_id']][] = $edge['target_id'];
+            }
+        }
+        $runningByImage = $runningByDigest = [];
+        $observations = Inventory::imageRuntimeObservationsSql($this->store);
+        foreach ($this->store->iterate("SELECT id, name, image_id, digest FROM ($observations) observations WHERE running = 1") as $observed) {
+            $runningByImage[$observed['image_id']][$observed['id']] = $observed['name'];
+            if (null !== $observed['digest']) {
+                $runningByDigest[$observed['digest']][$observed['id']] = $observed['name'];
+            }
         }
 
         $groups = [];
@@ -30,7 +43,7 @@ final class Analysis
             if (!isset($groups[$key])) {
                 $groups[$key] = [
                     'advisory' => $data['advisory'], 'package' => $package, 'type' => $data['type'],
-                    'rank' => 0, 'findings' => [], 'repositories' => [], 'running' => [], 'workloads' => [],
+                    'rank' => 0, 'findings' => [], 'repositories' => [], 'running' => [], 'workloads' => [], 'fix_available' => false,
                 ];
             }
             $group = &$groups[$key];
@@ -38,26 +51,33 @@ final class Analysis
                 'CRITICAL' => 4, 'HIGH' => 3, 'MEDIUM' => 2, 'LOW' => 1, default => 0,
             });
             $id = $finding['asset_id'];
-            $group['findings'][] = [
-                'id' => $finding['id'], 'asset' => $id, 'name' => $assets[$id]['name'] ?? $id,
-                'package' => $data['package'], 'version' => $data['version'], 'fixed' => $data['fixed'],
-            ];
+            $group['fix_available'] = $group['fix_available'] || '' !== $data['fixed'];
+            if ($includeFindings) {
+                $group['findings'][] = [
+                    'id' => $finding['id'], 'asset' => $id, 'name' => $assets[$id]['name'] ?? $id,
+                    'package' => $data['package'], 'version' => $data['version'], 'fixed' => $data['fixed'],
+                ];
+            }
 
-            // Only an image finding provides direct evidence of affected running containers.
-            foreach ($incoming['RUNS'][$id] ?? [] as $container) {
-                if (!($assets[$container]['data']['running'] ?? false)) {
+            $containers = $runningByImage[$id] ?? [];
+            if ('image' === ($assets[$id]['kind'] ?? null) && null !== $assets[$id]['digest']) {
+                $containers += $runningByDigest[$assets[$id]['digest']] ?? [];
+            }
+            foreach ($containers as $container => $name) {
+                if (isset($group['running'][$container])) {
                     continue;
                 }
-                $group['running'][$container] = $assets[$container]['name'];
-                foreach ($incoming['HOSTS'][$container] ?? [] as $parent) {
-                    foreach ($incoming['HOSTS'][$parent] ?? [] as $workload) {
+                $group['running'][$container] = $name;
+                foreach ($hosts[$container] ?? [] as $parent) {
+                    foreach ($hosts[$parent] ?? [] as $workload) {
                         if ('workload' === ($assets[$workload]['kind'] ?? null)) {
                             $group['workloads'][$workload] = $assets[$workload]['name'];
                         }
                     }
                 }
             }
-            $repos = 'repository' === ($assets[$id]['kind'] ?? null) ? [$id] : [...($outgoing['BUILT_FROM'][$id] ?? []), ...($outgoing['ASSOCIATED_SOURCE'][$id] ?? [])];
+            $repos = 'repository' === ($assets[$id]['kind'] ?? null) ? [$id]
+                : [...($sources['BUILT_FROM'][$id] ?? []), ...($sources['ASSOCIATED_SOURCE'][$id] ?? [])];
             foreach ($repos as $repo) {
                 if ('repository' === ($assets[$repo]['kind'] ?? null)) {
                     $group['repositories'][$repo] = $assets[$repo]['name'];
@@ -66,7 +86,6 @@ final class Analysis
             unset($group);
         }
         foreach ($groups as &$group) {
-            $group['fix_available'] = (bool) array_filter($group['findings'], static fn (array $finding): bool => '' !== $finding['fixed']);
             $group['priority'] = $group['rank'] * 100 + min(49, count($group['running'])) * 2 + (int) $group['fix_available'];
         }
         unset($group);
@@ -74,15 +93,15 @@ final class Analysis
 
         return [
             'exposure' => array_values($groups),
-            'shared' => $this->sharedDependencies($assets),
+            'shared' => $this->sharedDependencies(),
             'history' => $this->history(),
         ];
     }
 
-    private function sharedDependencies(array $assets): array
+    private function sharedDependencies(): array
     {
         $components = [];
-        foreach ($assets as $id => $asset) {
+        foreach ($this->store->iterate('SELECT id, data FROM assets') as $asset) {
             foreach ($asset['data']['sbom']['components'] ?? [] as $component) {
                 $purl = $component['purl'] ?? null;
                 if (!is_string($purl) || !str_starts_with($purl, 'pkg:')) {
@@ -93,20 +112,22 @@ final class Analysis
                 }
                 $package = preg_split('/[@?#]/', $purl, 2)[0];
                 $version = $component['version'] ?? 'Unknown';
-                $components[$package][$id][$version] = true;
+                $components[$package][$asset['id']][$version] = true;
             }
         }
 
-        $shared = [];
-        foreach ($components as $package => $observed) {
+        foreach ($components as $package => &$observed) {
             if (count($observed) < 2) {
+                unset($components[$package]);
                 continue;
             }
-            $shared[$package] = array_map('array_keys', $observed);
+            $observed = array_map('array_keys', $observed);
         }
-        uasort($shared, static fn (array $a, array $b): int => count($b) <=> count($a));
+        unset($observed);
+        uksort($components, static fn (string $a, string $b): int =>
+            count($components[$b]) <=> count($components[$a]) ?: strcmp($a, $b));
 
-        return $shared;
+        return $components;
     }
 
     private function history(): array

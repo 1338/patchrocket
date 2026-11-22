@@ -92,11 +92,13 @@ final class AssetScans
         }
     }
 
-    public function runningImages(array $registries, ?string $scope, bool $refresh, ?string $scopePrefix = null): iterable
+    /** @param list<string>|null $scopes */
+    public function runningImages(array $registries, ?string $scope, bool $refresh, ?string $scopePrefix = null, ?array $scopes = null): iterable
     {
         if (!$registries || array_filter($registries, static fn (string $name): bool => !preg_match('/^[a-z0-9][a-z0-9.-]*(?::[0-9]+)?$/D', $name))) {
             throw new \InvalidArgumentException('Explicitly select one or more registry hosts.');
         }
+        $scopeSet = null === $scopes ? null : array_fill_keys($scopes, true);
         $seen = [];
         foreach ($this->store->iterate(
             "SELECT i.id, i.name, i.data, c.data AS container FROM assets i
@@ -106,8 +108,10 @@ final class AssetScans
         ) as $row) {
             $id = $row['id'];
             $container = json_decode($row['container'], true, flags: JSON_THROW_ON_ERROR);
-            if (isset($seen[$id]) || !($container['running'] ?? false) || (null !== $scope && ($container['scope'] ?? '') !== $scope)
-                || (null !== $scopePrefix && !str_starts_with($container['scope'] ?? '', $scopePrefix))
+            $containerScope = $container['scope'] ?? '';
+            if (isset($seen[$id]) || !($container['running'] ?? false) || (null !== $scope && $containerScope !== $scope)
+                || (null !== $scopePrefix && !str_starts_with($containerScope, $scopePrefix))
+                || (null !== $scopeSet && !isset($scopeSet[$containerScope]))
                 || (!$refresh && ($row['data']['scan_source'] ?? null) && 'failed' !== ($row['data']['scan_outcome'] ?? null))) {
                 continue;
             }

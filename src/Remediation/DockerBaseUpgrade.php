@@ -16,10 +16,11 @@ final class DockerBaseUpgrade implements Strategy
         if (!empty($options['nginx_overlay'])) {
             return $this->overlayPlan($finding, $options, $file, $fixed);
         }
-        if (!preg_match('#^[\w][\w./:@-]+$#D', $current)
-            || !preg_match('#^[a-z0-9][a-z0-9.\/:_-]+@sha256:[0-9a-f]{64}$#D', $fixed)
-            || $current === $fixed) {
-            throw new \DomainException('Supply a current base reference and a different digest-pinned replacement.');
+        if (!preg_match('#^[\w][\w./:@-]+$#D', $current)) {
+            throw new RemediationFieldError('current', 'Enter the current base image reference from the Dockerfile.');
+        }
+        if (!preg_match('#^[a-z0-9][a-z0-9.\/:_-]+@sha256:[0-9a-f]{64}$#D', $fixed) || $current === $fixed) {
+            throw new RemediationFieldError('fixed', 'Enter a different replacement image pinned by its SHA-256 digest.');
         }
 
         return ['current' => $current, 'fixed' => $fixed, 'files' => [$file], 'checks' => [
@@ -30,8 +31,10 @@ final class DockerBaseUpgrade implements Strategy
     private function overlayPlan(array $finding, array $options, string $file, string $fixed): array
     {
         $module = dirname($file);
+        if (!preg_match('~^docker\.io/nginx/nginx-unprivileged:[0-9]+\.[0-9]+\.[0-9]+-alpine@sha256:[0-9a-f]{64}$~D', $fixed)) {
+            throw new RemediationFieldError('fixed', 'Enter a digest-pinned unprivileged nginx Alpine image.');
+        }
         if (!self::supportsOverlay($finding)
-            || !preg_match('~^docker\.io/nginx/nginx-unprivileged:[0-9]+\.[0-9]+\.[0-9]+-alpine@sha256:[0-9a-f]{64}$~D', $fixed)
             || !preg_match('~^[a-z0-9][a-z0-9._-]*$~D', $module)
             || !in_array($options['platform'] ?? null, ['linux/amd64', 'linux/arm64'], true)
             || empty($options['advisories'])) {
@@ -71,7 +74,8 @@ final class DockerBaseUpgrade implements Strategy
         $pattern = '/^(\h*FROM\h+(?:--platform=\S+\h+)?)'.preg_quote($plan['current'], '/').'(?=\h|\r?$)/mi';
         $updated = preg_replace_callback($pattern, static fn (array $m): string => $m[1].$plan['fixed'], $original, -1, $count);
         if (1 !== $count) {
-            throw new \DomainException('The current base must occur in exactly one static FROM instruction.');
+            $message = 'The current base must occur in exactly one static FROM instruction.';
+            throw empty($plan['nginx_overlay']) ? new RemediationFieldError('current', $message) : new \DomainException($message);
         }
         return $updated;
     }

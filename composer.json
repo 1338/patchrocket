@@ -19,17 +19,21 @@
         "symfony/dotenv": "7.4.*",
         "symfony/framework-bundle": "7.4.*",
         "symfony/http-client": "7.4.*",
+        "symfony/mcp-bundle": "^1.0@beta",
         "symfony/process": "7.4.*",
         "symfony/security-csrf": "7.4.*",
-        "symfony/twig-bundle": "7.4.*",
         "symfony/workflow": "7.4.*",
         "symfony/yaml": "7.4.*"
     },
     "require-dev": {
         "phpstan/phpstan": "^2.1",
         "phpunit/phpunit": "^11.5",
-        "symfony/ai-codex-platform": "^1.0@beta"
+        "symfony/ai-codex-platform": "^1.0@beta",
+        "symfony/stopwatch": "7.4.*"
     },
     "autoload": {"psr-4": {"App\\": "src/"}},
-    "config": {"platform": {"php": "8.2.32"}, "sort-packages": true}
+    "config": {"platform": {"php": "8.2.32"}, "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": false
+        }}
 }

@@ -18,7 +18,7 @@ final class OAuthSignIn
     ) {
     }
 
-    public function begin(#[\SensitiveParameter] array $provider, string $callback): array
+    public function begin(#[\SensitiveParameter] array $provider, string $callback, bool $link = false): array
     {
         $endpoints = $this->endpoints($provider);
         $flow = [
@@ -36,6 +36,9 @@ final class OAuthSignIn
         }
         if ($endpoints['jwks']) {
             $query['nonce'] = $flow['nonce'];
+            if ($link) {
+                $query['prompt'] = 'login';
+            }
         }
         $authorize = $endpoints['authorize'];
 
